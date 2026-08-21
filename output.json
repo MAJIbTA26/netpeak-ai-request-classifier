@@ -1,0 +1,258 @@
+[
+  {
+    "id": "REQ-001",
+    "category": "автоматизація",
+    "target_department": "маркетинг",
+    "priority": "medium",
+    "short_summary": "Автоматизація щотижневого імпорту основних метрик з Google Ads у таблицю.",
+    "requested_actions": [
+      "Автоматизувати вивантаження звіту по Google Ads",
+      "Налаштувати автоматичний перенос основних метрик по кампаніях у таблицю"
+    ],
+    "needs_clarification": false,
+    "processing_status": "ok",
+    "channel": "Slack",
+    "timestamp": "2026-06-08 09:14"
+  },
+  {
+    "id": "REQ-002",
+    "category": "автоматизація",
+    "target_department": "",
+    "priority": "medium",
+    "short_summary": "Запит на розробку бота без конкретизації вимог.",
+    "requested_actions": [
+      "Розробити бота"
+    ],
+    "needs_clarification": true,
+    "processing_status": "ok",
+    "channel": "Telegram",
+    "timestamp": "2026-06-08 09:31"
+  },
+  {
+    "id": "REQ-003",
+    "category": "автоматизація",
+    "target_department": "продажі",
+    "priority": "medium",
+    "short_summary": "Автоматичне створення саммарі та списку домовленостей з транскриптів дзвінків та їх передача в картку угоди PlanFix.",
+    "requested_actions": [
+      "Налаштувати автоматичну генерацію саммарі та списку домовленостей на основі транскриптів дзвінків",
+      "Інтегрувати процес із PlanFix для автоматичного збереження даних у картку угоди"
+    ],
+    "needs_clarification": false,
+    "processing_status": "ok",
+    "channel": "Email",
+    "timestamp": "2026-06-08 10:02"
+  },
+  {
+    "id": "REQ-004",
+    "category": "питання/консультація",
+    "target_department": "маркетинг",
+    "priority": "low",
+    "short_summary": "Теоретичне запитання щодо можливості використання штучного інтелекту для оцінки якості статей у блозі перед їх публікацією.",
+    "requested_actions": [],
+    "needs_clarification": false,
+    "processing_status": "ok",
+    "channel": "Slack",
+    "timestamp": "2026-06-08 10:20"
+  },
+  {
+    "id": "REQ-005",
+    "category": "звіт/аналітика",
+    "target_department": "бухгалтерія",
+    "priority": "high",
+    "short_summary": "Термінове вивантаження списку контрагентів з витратами понад 50к за травень для бухгалтерії.",
+    "requested_actions": [
+      "Вивантажити список усіх контрагентів з витратами понад 50к за травень"
+    ],
+    "needs_clarification": false,
+    "processing_status": "ok",
+    "channel": "Telegram",
+    "timestamp": "2026-06-08 11:05"
+  },
+  {
+    "id": "REQ-006",
+    "category": "звіт/аналітика",
+    "target_department": "аналітика",
+    "priority": "low",
+    "short_summary": "Розробка сервісу для генерації текстових підсумків тижневої аналітики з BigQuery у Google Doc.",
+    "requested_actions": [
+      "Налаштувати інтеграцію з експортом BigQuery",
+      "Реалізувати генерацію короткого текстового опису змін за тиждень",
+      "Забезпечити збереження звіту в Google Doc"
+    ],
+    "needs_clarification": false,
+    "processing_status": "ok",
+    "channel": "Email",
+    "timestamp": "2026-06-08 11:40"
+  },
+  {
+    "id": "REQ-007",
+    "category": "баг/підтримка",
+    "target_department": "маркетинг",
+    "priority": "high",
+    "short_summary": "Зламалася автоматизація парсингу інвойсів з Meta, через що рахунки не обробляються з понеділка.",
+    "requested_actions": [
+      "З'ясувати, хто створював автоматизацію",
+      "Полагодити парсинг інвойсів з Meta"
+    ],
+    "needs_clarification": false,
+    "processing_status": "ok",
+    "channel": "Slack",
+    "timestamp": "2026-06-08 12:15"
+  },
+  {
+    "id": "REQ-008",
+    "category": "поза скоупом",
+    "target_department": "",
+    "priority": "low",
+    "short_summary": "Подяка від користувача за успішно виконану роботу.",
+    "requested_actions": [],
+    "needs_clarification": false,
+    "processing_status": "ok",
+    "channel": "Telegram",
+    "timestamp": "2026-06-08 13:02"
+  },
+  {
+    "id": "REQ-009",
+    "category": "автоматизація",
+    "target_department": "HR",
+    "priority": "medium",
+    "short_summary": "Автоматизація первинного скринінгу PDF-резюме на технічні вакансії з отриманням структурованих даних та оцінки.",
+    "requested_actions": [
+      "Розробити інструмент для парсингу PDF-резюме та витягування структурованих даних",
+      "Реалізувати автоматичну оцінку відповідності кандидатів вимогам"
+    ],
+    "needs_clarification": false,
+    "processing_status": "ok",
+    "channel": "Email",
+    "timestamp": "2026-06-08 13:48"
+  },
+  {
+    "id": "REQ-010",
+    "category": "автоматизація",
+    "target_department": "маркетинг",
+    "priority": "medium",
+    "short_summary": "Автоматизація моніторингу згадок про Netpeak у Telegram із щоденним дайджестом та алертами про негативні згадки.",
+    "requested_actions": [
+      "Автоматизувати збір згадок про Netpeak у Telegram-каналах",
+      "Створити щоденний дайджест згадок",
+      "Налаштувати алерт для негативних згадок"
+    ],
+    "needs_clarification": false,
+    "processing_status": "ok",
+    "channel": "Slack",
+    "timestamp": "2026-06-08 14:11"
+  },
+  {
+    "id": "REQ-011",
+    "category": "звіт/аналітика",
+    "target_department": "",
+    "priority": "low",
+    "short_summary": "Запит на створення таблиці без деталізації вимог.",
+    "requested_actions": [
+      "Створити таблицю"
+    ],
+    "needs_clarification": true,
+    "processing_status": "ok",
+    "channel": "Telegram",
+    "timestamp": "2026-06-08 14:55"
+  },
+  {
+    "id": "REQ-012",
+    "category": "поза скоупом",
+    "target_department": "маркетинг",
+    "priority": "low",
+    "short_summary": "Запит щодо процедури подачі заявки на закупівлю ноутбука для SMM-відділу.",
+    "requested_actions": [],
+    "needs_clarification": false,
+    "processing_status": "ok",
+    "channel": "Email",
+    "timestamp": "2026-06-08 15:30"
+  },
+  {
+    "id": "REQ-013",
+    "category": "звіт/аналітика",
+    "target_department": "маркетинг",
+    "priority": "medium",
+    "short_summary": "Прохання додати користувача до списку отримувачів звіту по Google Ads, який раніше замовляла Оля.",
+    "requested_actions": [
+      "Додати користувача до розсилки звіту по Google Ads"
+    ],
+    "needs_clarification": false,
+    "processing_status": "ok",
+    "channel": "Slack",
+    "timestamp": "2026-06-08 16:02"
+  },
+  {
+    "id": "REQ-014",
+    "category": "автоматизація",
+    "target_department": "",
+    "priority": "low",
+    "short_summary": "Пропозиція розглянути зовнішній інструмент за посиланням та оцінити можливість створення схожого рішення.",
+    "requested_actions": [
+      "ознайомитися з інструментом за посиланням",
+      "оцінити можливість розробки аналога"
+    ],
+    "needs_clarification": true,
+    "processing_status": "ok",
+    "channel": "Telegram",
+    "timestamp": "2026-06-08 16:40"
+  },
+  {
+    "id": "REQ-015",
+    "category": "автоматизація",
+    "target_department": "маркетинг",
+    "priority": "medium",
+    "short_summary": "Створення інструменту для автоматичної генерації 5 коротких дописів у соцмережі з довгого інтерв'ю з дотриманням tone of voice.",
+    "requested_actions": [
+      "Розробити інструмент для згортання довгого інтерв'ю (10-15 сторінок) у 5 коротких постів для соцмереж із врахуванням tone of voice"
+    ],
+    "needs_clarification": false,
+    "processing_status": "ok",
+    "channel": "Email",
+    "timestamp": "2026-06-08 17:12"
+  },
+  {
+    "id": "REQ-016",
+    "category": "питання/консультація",
+    "target_department": "",
+    "priority": "low",
+    "short_summary": "Запит щодо перевірки релевантності відповідей асистента по базі знань та визначення, чи є це багом.",
+    "requested_actions": [],
+    "needs_clarification": false,
+    "processing_status": "ok",
+    "channel": "Slack",
+    "timestamp": "2026-06-09 09:08"
+  },
+  {
+    "id": "REQ-017",
+    "category": "інтеграція",
+    "target_department": "підтримка",
+    "priority": "high",
+    "short_summary": "Інтеграція Slack з PlanFix для автоматичного створення тікетів із каналу #support.",
+    "requested_actions": [
+      "Налаштувати інтеграцію між Slack та PlanFix",
+      "Забезпечити автоматичне створення тікетів у PlanFix з повідомлень каналу #support"
+    ],
+    "needs_clarification": false,
+    "processing_status": "ok",
+    "channel": "Telegram",
+    "timestamp": "2026-06-09 09:50"
+  },
+  {
+    "id": "REQ-018",
+    "category": "звіт/аналітика",
+    "target_department": "аналітика",
+    "priority": "medium",
+    "short_summary": "Створення дашборду з щоденним оновленням з BigQuery для виявлення та пояснення аномалій у витратах по підрядниках.",
+    "requested_actions": [
+      "Створити дашборд з щоденним імпортом даних з BigQuery",
+      "Налаштувати виявлення аномалій та різких стрибків у витратах по підрядниках",
+      "Додати генерацію пояснень аномалій природною мовою"
+    ],
+    "needs_clarification": false,
+    "processing_status": "ok",
+    "channel": "Email",
+    "timestamp": "2026-06-09 10:25"
+  }
+]
