@@ -20,6 +20,12 @@ from classifier import classify_request
 INPUT_FILE = "input_requests.csv"
 OUTPUT_JSON = "output.json"
 REPORT_FILE = "report.md"
+REQUIRED_COLUMNS = ["id", "channel", "timestamp", "raw_text"]
+
+
+class InputValidationError(Exception):
+    """Піднімається, коли вхідний CSV не відповідає очікуваній структурі."""
+    pass
 
 DELAY_BETWEEN_REQUESTS = 1.5  # секунди; бережемо ліміт безкоштовного тіру (RPM)
 
@@ -126,7 +132,12 @@ def build_report(results, filepath):
 
 def main():
     print(f"Читаю {INPUT_FILE}...")
-    requests = load_requests(INPUT_FILE)
+    try:
+        requests = load_requests(INPUT_FILE)
+    except InputValidationError as e:
+        print(f"\n❌ Помилка валідації вхідних даних:\n{e}")
+        return
+
     print(f"Знайдено {len(requests)} запитів.\n")
 
     results = process_all(requests)

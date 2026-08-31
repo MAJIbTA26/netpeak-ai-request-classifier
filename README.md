@@ -153,6 +153,27 @@ Billing alerts.
    OAuth-налаштування, що виходить за рамки 2-3 годин, відведених на
    тестове.
 
+## Тестування
+
+Проєкт покритий базовими автотестами (`pytest`) для найкритичніших
+частин рішення — тих самих, які виявились слабким місцем за фідбеком
+після першої версії тестового завдання:
+
+- **`test_schema.py`** — перевіряє, що схема `RequestAnalysis` коректно
+  приймає валідні дані та відхиляє категорію поза дозволеним списком.
+- **`test_classifier.py`** — перевіряє логіку розпізнавання типів помилок
+  API (`rate_limit`, `temporary_unavailable`, `model_not_found`) та
+  парсингу рекомендованого часу очікування з тексту помилки Google.
+
+### Запуск тестів
+
+```bash
+pip install pytest
+pytest -v
+```
+
+Очікуваний результат: 7 passed.
+
 ## Структура проєкту
 
 ```
@@ -160,7 +181,9 @@ netpeak-test-task/
 ├── main.py              # orchestration: CSV -> LLM -> output.json + report.md
 ├── classifier.py         # виклик Gemini API, retry-логіка, обробка помилок
 ├── schema.py              # Pydantic-схема структурованого виводу
-├── input_requests.csv     # вхідні дані (надані)
+├── test_schema.py          # автотести для схеми
+├── test_classifier.py       # автотести для обробки помилок
+├── input_requests.csv        # вхідні дані (надані)
 ├── requirements.txt
 ├── .env.example
 └── README.md
