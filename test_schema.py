@@ -1,5 +1,4 @@
 from schema import RequestAnalysis
-import pytest
 
 
 def test_valid_record_is_accepted():
@@ -16,15 +15,15 @@ def test_valid_record_is_accepted():
 
     assert record.id == "REQ-001"
     assert record.category == "автоматизація"
-    assert record.processing_status == "ok"  # значення за замовчуванням
-    
-    
-   
+    assert record.processing_status == "ok"
 
 
 def test_invalid_category_is_rejected():
     """Перевіряємо, що схема відхиляє категорію поза дозволеним списком."""
-    with pytest.raises(Exception):
+    import pytest
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
         RequestAnalysis(
             id="REQ-002",
             category="якась_дурниця_поза_списком",

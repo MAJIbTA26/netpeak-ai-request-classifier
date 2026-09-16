@@ -1,4 +1,7 @@
 google-genai==0.3.0
 pydantic==2.10.3
 python-dotenv==1.0.1
+
+# Dev-залежності (тестування, lint)
 pytest==8.3.4
+ruff==0.8.4

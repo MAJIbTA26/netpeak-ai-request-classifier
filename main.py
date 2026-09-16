@@ -9,35 +9,108 @@ report.md з агрегатами.
 
 import csv
 import json
+import logging
 import time
+from typing import Any
 
 from dotenv import load_dotenv
 
-load_dotenv()  # обов'язково ДО імпорту classifier (там читається GEMINI_API_KEY)
+load_dotenv()
 
 from classifier import classify_request
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s",
+)
+logger = logging.getLogger(__name__)
 
 INPUT_FILE = "input_requests.csv"
 OUTPUT_JSON = "output.json"
 REPORT_FILE = "report.md"
 REQUIRED_COLUMNS = ["id", "channel", "timestamp", "raw_text"]
+DELAY_BETWEEN_REQUESTS = 1.5  # секунди; бережемо ліміт безкоштовного тіру (RPM)
 
 
 class InputValidationError(Exception):
     """Піднімається, коли вхідний CSV не відповідає очікуваній структурі."""
-    pass
-
-DELAY_BETWEEN_REQUESTS = 1.5  # секунди; бережемо ліміт безкоштовного тіру (RPM)
 
 
-def load_requests(filepath):
+def load_requests(filepath: str) -> list[dict[str, str]]:
+    """Читає та валідує вхідний CSV-файл із запитами.
+
+    Перевіряє наявність усіх обов'язкових колонок, пропускає рядки з
+    порожнім id/raw_text та дублікатами id (з попередженням у логах),
+    замість того щоб впасти з незрозумілим KeyError десь посередині
+    обробки.
+
+    Args:
+        filepath: Шлях до вхідного CSV-файлу.
+
+    Returns:
+        Список валідних рядків (кожен - словник колонка->значення).
+
+    Raises:
+        InputValidationError: якщо відсутні обов'язкові колонки, файл
+            порожній, або після валідації не залишилось жодного
+            коректного запису.
+    """
     with open(filepath, encoding="utf-8") as f:
         reader = csv.DictReader(f)
-        return list(reader)
+
+        actual_columns = set(reader.fieldnames or [])
+        missing = [col for col in REQUIRED_COLUMNS if col not in actual_columns]
+        if missing:
+            raise InputValidationError(
+                f"У файлі '{filepath}' відсутні обов'язкові колонки: {missing}.\n"
+                f"Знайдені колонки: {sorted(actual_columns)}\n"
+                f"Очікувані колонки: {REQUIRED_COLUMNS}"
+            )
+
+        rows = list(reader)
+
+        if not rows:
+            raise InputValidationError(f"Файл '{filepath}' не містить жодного запису.")
+
+        seen_ids = set()
+        valid_rows: list[dict[str, str]] = []
+        for i, row in enumerate(rows, start=2):
+            req_id = (row.get("id") or "").strip()
+            raw_text = (row.get("raw_text") or "").strip()
+
+            if not req_id:
+                logger.warning(f"Рядок {i}: порожній id, запис пропущено.")
+                continue
+            if req_id in seen_ids:
+                logger.warning(f"Рядок {i}: дублікат id '{req_id}', запис пропущено.")
+                continue
+            if not raw_text:
+                logger.warning(f"Рядок {i} ({req_id}): порожній raw_text, запис пропущено.")
+                continue
+
+            seen_ids.add(req_id)
+            valid_rows.append(row)
+
+        if not valid_rows:
+            raise InputValidationError(
+                f"Файл '{filepath}' не містить жодного коректного запису "
+                f"після валідації (перевір id та raw_text)."
+            )
+
+        return valid_rows
 
 
-def process_all(requests):
-    results = []
+def process_all(requests: list[dict[str, str]]) -> list[dict[str, Any]]:
+    """Послідовно класифікує всі запити зі списку.
+
+    Args:
+        requests: Список валідних рядків із load_requests().
+
+    Returns:
+        Список результатів (словників) - кожен доповнений оригінальними
+        channel/timestamp з вхідного CSV.
+    """
+    results: list[dict[str, Any]] = []
     total = len(requests)
 
     for i, row in enumerate(requests, start=1):
@@ -45,7 +118,7 @@ def process_all(requests):
         raw_text = row["raw_text"]
         channel = row["channel"]
 
-        print(f"[{i}/{total}] Обробка {req_id}...")
+        logger.info(f"[{i}/{total}] Обробка {req_id}...")
         analysis = classify_request(req_id, raw_text, channel)
 
         result = analysis.model_dump()
@@ -59,20 +132,34 @@ def process_all(requests):
     return results
 
 
-def save_output(results, filepath):
+def save_output(results: list[dict[str, Any]], filepath: str) -> None:
+    """Зберігає повний структурований результат у JSON-файл.
+
+    Args:
+        results: Список результатів класифікації.
+        filepath: Шлях до вихідного JSON-файлу.
+    """
     with open(filepath, "w", encoding="utf-8") as f:
         json.dump(results, f, ensure_ascii=False, indent=2)
-    print(f"\nЗбережено {filepath}")
+    logger.info(f"Збережено {filepath}")
 
 
-def build_report(results, filepath):
+def build_report(results: list[dict[str, Any]], filepath: str) -> None:
+    """Формує короткий Markdown-звіт з агрегатами по категоріях,
+    пріоритету, відділах, та списками запитів, що потребують уточнення
+    чи не вдалось обробити.
+
+    Args:
+        results: Список результатів класифікації.
+        filepath: Шлях до вихідного .md файлу.
+    """
     total = len(results)
     failed = [r for r in results if r["processing_status"] == "failed"]
     needs_clarification = [r for r in results if r["needs_clarification"]]
 
-    by_category = {}
-    by_priority = {}
-    by_department = {}
+    by_category: dict[str, int] = {}
+    by_priority: dict[str, int] = {}
+    by_department: dict[str, int] = {}
 
     for r in results:
         by_category[r["category"]] = by_category.get(r["category"], 0) + 1
@@ -127,25 +214,27 @@ def build_report(results, filepath):
 
     with open(filepath, "w", encoding="utf-8") as f:
         f.write("\n".join(lines))
-    print(f"Збережено {filepath}")
+    logger.info(f"Збережено {filepath}")
 
 
-def main():
-    print(f"Читаю {INPUT_FILE}...")
+def main() -> None:
+    """Точка входу: читає CSV, класифікує всі запити, зберігає
+    output.json та report.md."""
+    logger.info(f"Читаю {INPUT_FILE}...")
     try:
         requests = load_requests(INPUT_FILE)
     except InputValidationError as e:
-        print(f"\n❌ Помилка валідації вхідних даних:\n{e}")
+        logger.error(f"Помилка валідації вхідних даних:\n{e}")
         return
 
-    print(f"Знайдено {len(requests)} запитів.\n")
+    logger.info(f"Знайдено {len(requests)} запитів.")
 
     results = process_all(requests)
 
     save_output(results, OUTPUT_JSON)
     build_report(results, REPORT_FILE)
 
-    print("\nГотово!")
+    logger.info("Готово!")
 
 
 if __name__ == "__main__":
