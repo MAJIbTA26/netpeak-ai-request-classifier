@@ -103,12 +103,24 @@ def load_requests(filepath: str) -> list[dict[str, str]]:
 def process_all(requests: list[dict[str, str]]) -> list[dict[str, Any]]:
     """Послідовно класифікує всі запити зі списку.
 
+    Якщо посеред обробки станеться критична помилка (наприклад,
+    RuntimeError через невалідний API-ключ - усі наступні запити все
+    одно провалились б так само), уже оброблені результати НЕ
+    губляться: вони зберігаються у output.json перед тим, як помилка
+    прокидається далі. Це виправляє реальну прогалину, знайдену під
+    час код-рев'ю: раніше часткові результати втрачались повністю.
+
     Args:
         requests: Список валідних рядків із load_requests().
 
     Returns:
         Список результатів (словників) - кожен доповнений оригінальними
         channel/timestamp з вхідного CSV.
+
+    Raises:
+        RuntimeError: прокидається далі після збереження часткових
+            результатів, якщо classify_request() підняв критичну
+            помилку авторизації (retry для неї безглуздий).
     """
     results: list[dict[str, Any]] = []
     total = len(requests)
@@ -119,7 +131,18 @@ def process_all(requests: list[dict[str, str]]) -> list[dict[str, Any]]:
         channel = row["channel"]
 
         logger.info(f"[{i}/{total}] Обробка {req_id}...")
-        analysis = classify_request(req_id, raw_text, channel)
+
+        try:
+            analysis = classify_request(req_id, raw_text, channel)
+        except RuntimeError as e:
+            logger.error(
+                f"Критична помилка на запиті {req_id} ({i}/{total}): {e}\n"
+                f"Зберігаю {len(results)} уже оброблених результатів перед зупинкою."
+            )
+            if results:
+                save_output(results, OUTPUT_JSON)
+                build_report(results, REPORT_FILE)
+            raise
 
         result = analysis.model_dump()
         result["channel"] = channel
@@ -229,7 +252,15 @@ def main() -> None:
 
     logger.info(f"Знайдено {len(requests)} запитів.")
 
-    results = process_all(requests)
+    try:
+        results = process_all(requests)
+    except RuntimeError as e:
+        logger.error(
+            f"Обробку зупинено через критичну помилку: {e}\n"
+            f"Часткові результати вже збережено в {OUTPUT_JSON} та {REPORT_FILE} "
+            f"(якщо встигли обробити хоча б один запит)."
+        )
+        return
 
     save_output(results, OUTPUT_JSON)
     build_report(results, REPORT_FILE)
