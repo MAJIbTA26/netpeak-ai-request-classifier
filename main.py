@@ -17,7 +17,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from classifier import classify_request
+from classifier import classify_request  # noqa: E402
 
 logging.basicConfig(
     level=logging.INFO,
