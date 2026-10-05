@@ -4,20 +4,22 @@ AWS Lambda entry point для Request Classifier.
 Спрацьовує на подію S3 PutObject (завантаження CSV у вхідний бакет):
     1. Завантажує CSV з S3 у /tmp (єдине записуване місце в Lambda).
     2. Обробляє його тим самим кодом, що й локальний запуск (main.py):
-       load_requests -> process_all -> save_output/build_report.
+       load_requests -> process_all_async -> save_output/build_report.
+       Запити обробляються паралельно (ліміт - змінна MAX_CONCURRENCY).
     3. Завантажує output.json і report.md назад у вихідний S3-бакет.
 
 GEMINI_API_KEY передається через Lambda environment variables
 (Configuration -> Environment variables), а не через .env файл.
 """
 
+import asyncio
 import logging
 import os
 
 import boto3
 
 from classifier import classify_request  # noqa: F401 (потрібен для process_all)
-from main import build_report, load_requests, process_all, save_output
+from main import build_report, load_requests, process_all_async, save_output
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -47,7 +49,7 @@ def lambda_handler(event, context):
     requests_list = load_requests(LOCAL_INPUT_PATH)
     logger.info(f"Знайдено {len(requests_list)} запитів")
 
-    results = process_all(requests_list)
+    results = asyncio.run(process_all_async(requests_list))
 
     save_output(results, LOCAL_OUTPUT_JSON)
     build_report(results, LOCAL_REPORT_MD)

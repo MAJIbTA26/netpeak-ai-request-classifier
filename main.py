@@ -7,17 +7,21 @@ report.md з агрегатами.
     python main.py
 """
 
+import asyncio
 import csv
 import json
 import logging
+import os
 import time
 from typing import Any
 
 from dotenv import load_dotenv
 
-load_dotenv()
+from classifier import classify_request
 
-from classifier import classify_request  # noqa: E402
+# .env читається до першого виклику API: classifier бере GEMINI_API_KEY
+# з середовища лише всередині _get_client(), а не під час імпорту.
+load_dotenv()
 
 logging.basicConfig(
     level=logging.INFO,
@@ -30,6 +34,7 @@ OUTPUT_JSON = "output.json"
 REPORT_FILE = "report.md"
 REQUIRED_COLUMNS = ["id", "channel", "timestamp", "raw_text"]
 DELAY_BETWEEN_REQUESTS = 1.5  # секунди; бережемо ліміт безкоштовного тіру (RPM)
+DEFAULT_MAX_CONCURRENCY = 3  # скільки запитів до Gemini виконується одночасно
 
 
 class InputValidationError(Exception):
@@ -102,6 +107,9 @@ def load_requests(filepath: str) -> list[dict[str, str]]:
 def process_all(requests: list[dict[str, str]]) -> list[dict[str, Any]]:
     """Послідовно класифікує всі запити зі списку.
 
+    Залишена як простий синхронний варіант; основний шлях виконання
+    (main() та AWS Lambda) використовує process_all_async().
+
     Якщо посеред обробки станеться критична помилка (наприклад,
     RuntimeError через невалідний API-ключ - усі наступні запити все
     одно провалились б так само), уже оброблені результати НЕ
@@ -150,6 +158,105 @@ def process_all(requests: list[dict[str, str]]) -> list[dict[str, Any]]:
 
         if i < total:
             time.sleep(DELAY_BETWEEN_REQUESTS)
+
+    return results
+
+
+def get_max_concurrency() -> int:
+    """Повертає ліміт одночасних запитів до LLM.
+
+    Береться зі змінної середовища MAX_CONCURRENCY (зручно задавати в
+    Lambda -> Configuration -> Environment variables). Якщо змінна не
+    задана або некоректна - використовується DEFAULT_MAX_CONCURRENCY.
+
+    Returns:
+        Ціле число не менше 1.
+    """
+    raw = os.environ.get("MAX_CONCURRENCY", "")
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        if raw:
+            logger.warning(f"MAX_CONCURRENCY='{raw}' некоректне, використовую {DEFAULT_MAX_CONCURRENCY}.")
+        return DEFAULT_MAX_CONCURRENCY
+
+
+async def process_all_async(
+    requests: list[dict[str, str]],
+    max_concurrency: int | None = None,
+) -> list[dict[str, Any]]:
+    """Паралельно класифікує всі запити (asyncio.gather + Semaphore).
+
+    Одночасно виконується не більше max_concurrency запитів: Semaphore
+    не дає впертись у rate limit безкоштовного тіру Gemini. Блокуюча
+    classify_request() (з усім retry/fallback-логіком) виконується в
+    окремих потоках через asyncio.to_thread, тому event loop не блокується.
+
+    Порядок результатів збігається з порядком вхідних запитів, незалежно
+    від того, у якому порядку вони завершились.
+
+    Поведінка при критичній помилці така сама, як у process_all():
+    якщо classify_request() піднімає RuntimeError (невалідний API-ключ),
+    нові запити більше не стартують, уже оброблені результати
+    зберігаються в output.json/report.md, а помилка прокидається далі.
+
+    Args:
+        requests: Список валідних рядків із load_requests().
+        max_concurrency: Ліміт одночасних запитів. Якщо None - береться
+            з get_max_concurrency().
+
+    Returns:
+        Список результатів у порядку вхідних запитів.
+
+    Raises:
+        RuntimeError: після збереження часткових результатів.
+    """
+    limit = max_concurrency if max_concurrency is not None else get_max_concurrency()
+    semaphore = asyncio.Semaphore(max(1, limit))
+    abort = asyncio.Event()
+    total = len(requests)
+    slots: list[dict[str, Any] | None] = [None] * total
+    first_error: RuntimeError | None = None
+
+    logger.info(f"Паралельна обробка: {total} запитів, одночасно не більше {limit}.")
+
+    async def worker(index: int, row: dict[str, str]) -> None:
+        nonlocal first_error
+        async with semaphore:
+            if abort.is_set():
+                return
+
+            req_id = row["id"]
+            channel = row["channel"]
+            logger.info(f"[{index + 1}/{total}] Обробка {req_id}...")
+
+            try:
+                analysis = await asyncio.to_thread(classify_request, req_id, row["raw_text"], channel)
+            except RuntimeError as e:
+                if first_error is None:
+                    first_error = e
+                    logger.error(f"Критична помилка на запиті {req_id} ({index + 1}/{total}): {e}")
+                abort.set()
+                return
+
+            result = analysis.model_dump()
+            result["channel"] = channel
+            result["timestamp"] = row["timestamp"]
+            slots[index] = result
+
+            if index < total - 1:
+                await asyncio.sleep(DELAY_BETWEEN_REQUESTS)
+
+    await asyncio.gather(*(worker(i, row) for i, row in enumerate(requests)))
+
+    results = [r for r in slots if r is not None]
+
+    if first_error is not None:
+        logger.error(f"Зберігаю {len(results)} уже оброблених результатів перед зупинкою.")
+        if results:
+            save_output(results, OUTPUT_JSON)
+            build_report(results, REPORT_FILE)
+        raise first_error
 
     return results
 
@@ -252,7 +359,7 @@ def main() -> None:
     logger.info(f"Знайдено {len(requests)} запитів.")
 
     try:
-        results = process_all(requests)
+        results = asyncio.run(process_all_async(requests))
     except RuntimeError as e:
         logger.error(
             f"Обробку зупинено через критичну помилку: {e}\n"
