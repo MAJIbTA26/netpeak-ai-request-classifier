@@ -93,8 +93,7 @@ def load_requests(filepath: str) -> list[dict[str, str]]:
 
         if not valid_rows:
             raise InputValidationError(
-                f"Файл '{filepath}' не містить жодного коректного запису "
-                f"після валідації (перевір id та raw_text)."
+                f"Файл '{filepath}' не містить жодного коректного запису після валідації (перевір id та raw_text)."
             )
 
         return valid_rows

@@ -28,15 +28,17 @@ def test_classify_request_returns_valid_analysis_on_success(mock_get_client):
     """Перевіряємо повний "щасливий шлях": API одразу повертає валідний
     JSON, і processing_status встановлюється в "ok"."""
     mock_client = MagicMock()
-    mock_client.models.generate_content.return_value = _make_mock_response({
-        "id": "REQ-001",
-        "category": "автоматизація",
-        "target_department": "маркетинг",
-        "priority": "medium",
-        "short_summary": "Тестовий запит",
-        "requested_actions": ["зробити щось"],
-        "needs_clarification": False,
-    })
+    mock_client.models.generate_content.return_value = _make_mock_response(
+        {
+            "id": "REQ-001",
+            "category": "автоматизація",
+            "target_department": "маркетинг",
+            "priority": "medium",
+            "short_summary": "Тестовий запит",
+            "requested_actions": ["зробити щось"],
+            "needs_clarification": False,
+        }
+    )
     mock_get_client.return_value = mock_client
 
     result = classify_request("REQ-001", "Тестовий текст запиту", "Slack")
@@ -77,22 +79,26 @@ def test_classify_request_recovers_after_one_bad_attempt(mock_get_client):
     має бути успішним, без переходу у fallback."""
     mock_client = MagicMock()
 
-    bad_response = _make_mock_response({
-        "id": "REQ-003",
-        "category": "щось_чого_немає_у_списку",  # невалідна категорія
-        "priority": "low",
-        "short_summary": "Тест",
-        "needs_clarification": False,
-    })
-    good_response = _make_mock_response({
-        "id": "REQ-003",
-        "category": "питання/консультація",
-        "target_department": "",
-        "priority": "low",
-        "short_summary": "Тест після виправлення",
-        "requested_actions": [],
-        "needs_clarification": False,
-    })
+    bad_response = _make_mock_response(
+        {
+            "id": "REQ-003",
+            "category": "щось_чого_немає_у_списку",  # невалідна категорія
+            "priority": "low",
+            "short_summary": "Тест",
+            "needs_clarification": False,
+        }
+    )
+    good_response = _make_mock_response(
+        {
+            "id": "REQ-003",
+            "category": "питання/консультація",
+            "target_department": "",
+            "priority": "low",
+            "short_summary": "Тест після виправлення",
+            "requested_actions": [],
+            "needs_clarification": False,
+        }
+    )
 
     mock_client.models.generate_content.side_effect = [bad_response, good_response]
     mock_get_client.return_value = mock_client

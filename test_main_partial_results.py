@@ -63,6 +63,7 @@ def test_process_all_saves_partial_results_on_runtime_error(mock_sleep, mock_cla
         assert (tmp_path / "output.json").exists()
 
         import json
+
         with open(tmp_path / "output.json", encoding="utf-8") as f:
             saved = json.load(f)
 

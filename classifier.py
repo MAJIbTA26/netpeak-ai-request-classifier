@@ -31,7 +31,7 @@ from schema import RequestAnalysis
 logger = logging.getLogger(__name__)
 
 MODEL = "gemini-flash-lite-latest"  # висока денна квота (~1000/день),
-                                       # ідеально для класифікаційних задач
+# ідеально для класифікаційних задач
 FALLBACK_MODEL = "gemini-flash-latest"  # резерв, якщо основна недоступна
 MAX_RETRIES = 3
 BASE_RETRY_DELAY_SECONDS = 3  # з exponential backoff: 3s, 6s, 12s, 24s
@@ -223,7 +223,7 @@ def classify_request(request_id: str, raw_text: str, channel: str) -> RequestAna
 
         except (json.JSONDecodeError, ValidationError) as e:
             last_error = e
-            delay = BASE_RETRY_DELAY_SECONDS * (2 ** attempt)
+            delay = BASE_RETRY_DELAY_SECONDS * (2**attempt)
             logger.warning(f"[{request_id}] спроба {attempt + 1} невдала (валідація): {e}")
             time.sleep(delay)
             continue
@@ -234,10 +234,7 @@ def classify_request(request_id: str, raw_text: str, channel: str) -> RequestAna
 
             if error_type == "rate_limit":
                 delay = parse_retry_delay(str(e))
-                logger.warning(
-                    f"[{request_id}] rate limit на {model}, "
-                    f"чекаю {delay:.0f} сек (за рекомендацією Google)"
-                )
+                logger.warning(f"[{request_id}] rate limit на {model}, чекаю {delay:.0f} сек (за рекомендацією Google)")
                 time.sleep(delay)
                 continue
 
@@ -247,15 +244,13 @@ def classify_request(request_id: str, raw_text: str, channel: str) -> RequestAna
 
             if error_type == "auth_error":
                 logger.error(f"[{request_id}] помилка авторизації API: {e}")
-                raise RuntimeError(
-                    f"Помилка авторизації API: {e}\nПеревір GEMINI_API_KEY у .env"
-                ) from e
+                raise RuntimeError(f"Помилка авторизації API: {e}\nПеревір GEMINI_API_KEY у .env") from e
 
             if error_type == "bad_request":
                 logger.warning(f"[{request_id}] некоректний запит до API: {e}")
                 break
 
-            delay = BASE_RETRY_DELAY_SECONDS * (2 ** attempt)
+            delay = BASE_RETRY_DELAY_SECONDS * (2**attempt)
             logger.warning(f"[{request_id}] {error_type} на {model} (спроба {attempt + 1}): {e}")
             time.sleep(delay)
             continue
