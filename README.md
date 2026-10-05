@@ -71,7 +71,7 @@ CSV  ──►  S3 (input)  ──event .csv──►  Lambda  ──►  Gemini
 | **S3** | два бакети: вхідний та вихідний |
 | **Event notification** | `s3:ObjectCreated:Put/Post` з фільтром суфікса `.csv` → Lambda |
 | **Lambda** | Python 3.13, x86_64, handler `lambda_handler.lambda_handler`, збільшений timeout і пам'ять (виклики LLM послідовні) |
-| **Змінні середовища** | `GEMINI_API_KEY`, `OUTPUT_BUCKET`; опційно `MAX_CONCURRENCY`, `MAX_REQUESTS_PER_MINUTE` (див. «Паралельна обробка») та `TELEGRAM_*` (див. «Telegram-сповіщення») |
+| **Змінні середовища** | `GEMINI_API_KEY`, `OUTPUT_BUCKET`; опційно `MAX_CONCURRENCY`, `MAX_REQUESTS_PER_MINUTE` (див. «Паралельна обробка»), `TELEGRAM_*` (див. «Telegram-сповіщення») та `GOOGLE_*` (див. «Реєстр у Google Sheets») |
 | **IAM-роль** | мінімальні привілеї: `s3:GetObject` / `s3:ListBucket` на вхідний бакет, `s3:PutObject` на вихідний, логи в CloudWatch |
 | **Логи** | CloudWatch Logs |
 
@@ -156,9 +156,64 @@ LLM. Блокуюча `classify_request()` (з усім retry/fallback) вико
 Використовується тільки стандартна бібліотека (`urllib`), тому розмір пакета
 для Lambda не збільшується.
 
+## Реєстр у Google Sheets
+
+Кожен оброблений запит додається рядком у Google-таблицю (`sheets_logger.py`):
+час обробки, файл, id, канал, категорія, відділ, пріоритет, суть, дії, ознаки
+«потрібне уточнення» та «не вдалося обробити» і колонка «Статус роботи»
+(спочатку «нова») для подальшого відстеження людиною. Якщо таблиця порожня,
+заголовки створюються автоматично.
+
+Підтримано два способи запису. Якщо задано `GOOGLE_APPS_SCRIPT_URL`,
+використовується перший.
+
+### Спосіб 1: Google Apps Script (без Google Cloud і ключів)
+
+У таблицю додається невеликий скрипт [`apps_script/Code.js`](apps_script/Code.js),
+який публікується як веб-застосунок. Сервіс надсилає йому рядки HTTP-запитом із
+секретним токеном; скрипт перевіряє токен і додає рядки в таблицю.
+
+1. Таблиця → **Розширення → Apps Script**, вставити код із `apps_script/Code.js`.
+2. Замінити `TOKEN` на довгий випадковий рядок.
+3. **Deploy → New deployment → Web app**: *Execute as* — Me, *Who has access* — Anyone.
+4. Скопіювати URL (закінчується на `/exec`).
+
+| Змінна середовища | Призначення |
+|---|---|
+| `GOOGLE_APPS_SCRIPT_URL` | URL веб-застосунку (`.../exec`) |
+| `GOOGLE_APPS_SCRIPT_TOKEN` | той самий токен, що в скрипті |
+| `GOOGLE_SHEET_TAB` | назва аркуша (необов'язково; за замовчуванням перший) |
+
+Безпека: URL веб-застосунку відкритий, тому доступ захищено токеном у тілі
+запиту; без правильного токена скрипт нічого не записує. Токен і URL —
+секрети: у репозиторій їх не комітити.
+
+### Спосіб 2: Google Sheets API (сервісний акаунт)
+
+Потрібен JSON-ключ сервісного акаунта. У частини організацій створення ключів
+заборонене політикою `iam.disableServiceAccountKeyCreation` — тоді використовується
+спосіб 1.
+
+| Змінна середовища | Призначення |
+|---|---|
+| `GOOGLE_SHEET_ID` | ID таблиці (частина URL між `/d/` і `/edit`) |
+| `GOOGLE_SERVICE_ACCOUNT_JSON` | вміст JSON-ключа (Lambda) |
+| `GOOGLE_SERVICE_ACCOUNT_FILE` | або шлях до файлу з ключем (локально; файл не комітити!) |
+| `GOOGLE_SHEET_TAB` | назва аркуша (необов'язково) |
+
+Таблицю потрібно надати email сервісного акаунта з правами редактора.
+
+> **Обмеження:** сумарний розмір змінних середовища Lambda — 4 КБ, а JSON-ключ
+> займає ~2,5 КБ. У продакшн-версії краще Workload Identity Federation
+> (AWS → Google без ключів) або зберігання ключа в AWS Secrets Manager.
+
+Дані пишуться як текст, тож значення, що починаються з `=`, не виконуються як
+формули. Якщо запис не налаштовано або Google повернув помилку, конвеєр працює
+далі, а проблема лише логується.
+
 ## Тестування
 
-Проєкт покритий **46 автотестами** (`pytest`) трьох типів:
+Проєкт покритий **65 автотестами** (`pytest`) чотирьох типів:
 
 - **Юніт-тести** (`test_schema.py`, `test_classifier.py`) — перевіряють
   окремі функції ізольовано: валідацію Pydantic-схеми, розпізнавання
@@ -169,6 +224,9 @@ LLM. Блокуюча `classify_request()` (з усім retry/fallback) вико
   `processing_status="failed"`, і реалістичний сценарій "перша спроба
   невдала, друга успішна".
 
+- **Тести запису в Google Sheets** (`test_sheets_logger.py`) — формування рядків,
+  автоматичні заголовки, append-запит, робота без налаштувань, відсутність
+  винятків при збоях Google.
 - **Тести Telegram-сповіщень** (`test_telegram_notifier.py`) — форматування,
   розбиття довгих повідомлень, маршрутизація по відділах, повтор при `429`,
   відсутність витоку токена в помилках.
@@ -180,7 +238,7 @@ LLM. Блокуюча `classify_request()` (з усім retry/fallback) вико
 pytest -v
 ```
 
-Очікуваний результат: **46 passed**.
+Очікуваний результат: **65 passed**.
 
 ## Логування
 
@@ -277,7 +335,8 @@ RESOURCE_EXHAUSTED` (денна квота, не хвилинна!) — вирі
 3. **Infrastructure as Code** (AWS SAM або Terraform) — замість ручного
    налаштування бакетів, ролі та тригера в консолі.
 4. **Dead-letter queue та алерти** на помилки Lambda (SQS DLQ + CloudWatch Alarm).
-5. Запис підтверджених запитів у Google Sheets — останнім у пріоритеті (потребує OAuth).
+5. Оновлення колонки «Статус роботи» в Google Sheets після підтвердження запиту
+   в Telegram.
 
 ## Структура проєкту
 
@@ -286,11 +345,14 @@ netpeak-test-task/
 ├── .github/workflows/ci.yml    # CI: lint + тести на кожен push
 ├── main.py                      # orchestration: CSV -> LLM -> output.json + report.md
 ├── classifier.py                 # виклик Gemini API, retry-логіка, логування
+├── apps_script/Code.js                # скрипт для таблиці (запис через Apps Script)
+├── sheets_logger.py                   # реєстр запитів у Google Sheets
 ├── telegram_notifier.py               # Telegram-сповіщення (підсумок + відділи)
 ├── lambda_handler.py              # AWS Lambda: S3-подія -> класифікація -> результат в S3
 ├── schema.py                      # Pydantic-схема структурованого виводу
 ├── test_schema.py                  # юніт-тести схеми
 ├── test_classifier.py               # юніт-тести обробки помилок
+├── test_sheets_logger.py              # тести запису в Google Sheets
 ├── test_telegram_notifier.py          # тести Telegram-сповіщень
 ├── test_main_async.py                # тести паралельної обробки (asyncio)
 ├── test_classifier_integration.py    # інтеграційні тести з mock genai.Client

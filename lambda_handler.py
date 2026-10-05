@@ -7,8 +7,9 @@ AWS Lambda entry point для Request Classifier.
        load_requests -> process_all_async -> save_output/build_report.
        Запити обробляються паралельно (ліміт - змінна MAX_CONCURRENCY).
     3. Завантажує output.json і report.md назад у вихідний S3-бакет.
-    4. Надсилає підсумок і запити по відділах у Telegram (якщо задано
-       TELEGRAM_BOT_TOKEN і TELEGRAM_CHAT_ID).
+    4. Додає запити в реєстр Google Sheets (якщо задано GOOGLE_SHEET_ID і
+       ключ сервісного акаунта) та надсилає підсумок і запити по відділах
+       у Telegram (якщо задано TELEGRAM_BOT_TOKEN і TELEGRAM_CHAT_ID).
 
 GEMINI_API_KEY передається через Lambda environment variables
 (Configuration -> Environment variables), а не через .env файл.
@@ -22,6 +23,7 @@ import boto3
 
 from classifier import classify_request  # noqa: F401 (потрібен для process_all)
 from main import build_report, load_requests, process_all_async, save_output
+from sheets_logger import append_results
 from telegram_notifier import notify_results
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -68,8 +70,10 @@ def lambda_handler(event, context):
 
     logger.info(f"Результати завантажено: s3://{OUTPUT_BUCKET}/{output_json_key}")
 
-    # 4. Сповіщення в Telegram (необов'язково; збій не ламає обробку)
-    notify_results(results, os.path.basename(input_key))
+    # 4. Реєстр у Google Sheets та сповіщення в Telegram (необов'язково; збій не ламає обробку)
+    source_name = os.path.basename(input_key)
+    append_results(results, source_name)
+    notify_results(results, source_name)
 
     return {
         "statusCode": 200,

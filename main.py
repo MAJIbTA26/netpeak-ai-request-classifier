@@ -18,6 +18,7 @@ from typing import Any
 from dotenv import load_dotenv
 
 from classifier import classify_request
+from sheets_logger import append_results
 from telegram_notifier import notify_results
 
 # .env читається до першого виклику API: classifier бере GEMINI_API_KEY
@@ -425,6 +426,7 @@ def main() -> None:
 
     save_output(results, OUTPUT_JSON)
     build_report(results, REPORT_FILE)
+    append_results(results, INPUT_FILE)
     notify_results(results, INPUT_FILE)
 
     logger.info("Готово!")
