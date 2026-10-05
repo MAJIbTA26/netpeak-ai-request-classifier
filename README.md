@@ -4,6 +4,10 @@ Python-сервіс, який читає вхідний "інбокс" запи�
 класифікує кожен запит через LLM (Gemini) у строгу структуру, і формує
 короткий агрегований звіт.
 
+Працює у двох режимах: **локально** (`python main.py`) та як **serverless-конвеєр
+на AWS** (S3 → Lambda → Gemini API → S3): завантажуєш CSV у бакет, і результат
+з'являється у вихідному бакеті автоматично.
+
 ## Як запустити
 
 ### 1. Встанови залежності
@@ -43,6 +47,69 @@ python main.py
 Скрипт прочитає `input_requests.csv`, обробить кожен запит і створить:
 - `output.json` — повний структурований результат по всіх запитах
 - `report.md` — короткий звіт з агрегатами
+
+## Розгортання на AWS (serverless-конвеєр)
+
+```
+CSV  ──►  S3 (input)  ──event .csv──►  Lambda  ──►  Gemini API
+                                          │
+                                          ▼
+                              S3 (output): results/<name>_output.json
+                                           results/<name>_report.md
+```
+
+Завантаження файлу `*.csv` у вхідний S3-бакет автоматично запускає Lambda-функцію
+(`lambda_handler.py`, Python 3.13). Вона завантажує файл у `/tmp`, виконує ту саму
+логіку, що й `main.py` (`load_requests` → `process_all` → `save_output` /
+`build_report`), і зберігає `*_output.json` та `*_report.md` у вихідний бакет
+у папку `results/`.
+
+### Що налаштовано
+
+| Компонент | Налаштування |
+|---|---|
+| **S3** | два бакети: вхідний та вихідний |
+| **Event notification** | `s3:ObjectCreated:Put/Post` з фільтром суфікса `.csv` → Lambda |
+| **Lambda** | Python 3.13, x86_64, handler `lambda_handler.lambda_handler`, збільшений timeout і пам'ять (виклики LLM послідовні) |
+| **Змінні середовища** | `GEMINI_API_KEY`, `OUTPUT_BUCKET` |
+| **IAM-роль** | мінімальні привілеї: `s3:GetObject` / `s3:ListBucket` на вхідний бакет, `s3:PutObject` на вихідний, логи в CloudWatch |
+| **Логи** | CloudWatch Logs |
+
+### Збірка пакета для Lambda
+
+Залежності треба ставити для Linux, навіть якщо розробка йде на Windows
+(інакше в пакет потраплять `.pyd`-файли, які Lambda не завантажить):
+
+```bash
+pip install -r requirements.txt --target package \
+    --platform manylinux2014_x86_64 --only-binary=:all: \
+    --python-version 3.13 --implementation cp
+```
+
+Далі скопіюй у `package/` файли `main.py`, `classifier.py`, `schema.py`,
+`lambda_handler.py` та заархівуй **вміст** папки (файли мають бути в корені архіву,
+а не всередині підпапки) у `deployment.zip` і завантаж його у Lambda
+(до 50 МБ через консоль).
+
+### Перевірка
+
+```bash
+aws s3 cp input_requests.csv s3://<input-bucket>/
+aws s3 ls s3://<output-bucket>/results/
+```
+
+### Типові проблеми, які траплялись
+
+- **Lambda не запускається після завантаження файлу** — перевір фільтр суфікса
+  в Event notifications: зайвий пробіл (`" .csv"`) вимикає тригер без жодної
+  помилки. Перевірити можна командою `aws s3api get-bucket-notification-configuration`.
+- **`API_KEY_INVALID`** — некоректно введений ключ у змінній `GEMINI_API_KEY`.
+- **`No module named ...` / помилка імпорту `_cffi_backend`** — пакет зібрано
+  під Windows, а не під Linux (див. команду вище).
+- **Немає групи логів у CloudWatch** — функція ще жодного разу не викликалась.
+
+> У продакшн-версії ключ варто зберігати в AWS Secrets Manager, а не в змінній
+> середовища.
 
 ## Тестування
 
@@ -135,6 +202,10 @@ RESOURCE_EXHAUSTED` (денна квота, не хвилинна!) — вирі
 18 тестових запитів цього достатньо, але для сотень/тисяч запитів на
 день знадобиться Batch API або платний тір + `asyncio`.
 
+У Lambda додається ще одне обмеження: максимальний час виконання одного
+виклику — 15 хвилин, а запити обробляються послідовно. Для великих файлів
+потрібна паралельна обробка або розбиття на чанки (наприклад, через SQS).
+
 ### Недетермінізм LLM
 Виставлено `temperature=0`, що зменшує, але не гарантує повну
 відсутність варіативності відповідей між запусками.
@@ -151,7 +222,10 @@ RESOURCE_EXHAUSTED` (денна квота, не хвилинна!) — вирі
 2. **Telegram-дайджест** — надсилання звіту в Telegram після обробки
    (маю перевірений досвід з іншого pet-проєкту).
 3. **Docker-образ** — для відтворюваного запуску.
-4. Запис у Google Sheets — останнім у пріоритеті (потребує OAuth).
+4. **Infrastructure as Code** (AWS SAM або Terraform) — замість ручного
+   налаштування бакетів, ролі та тригера в консолі.
+5. **Dead-letter queue та алерти** на помилки Lambda (SQS DLQ + CloudWatch Alarm).
+6. Запис у Google Sheets — останнім у пріоритеті (потребує OAuth).
 
 ## Структура проєкту
 
@@ -160,6 +234,7 @@ netpeak-test-task/
 ├── .github/workflows/ci.yml    # CI: lint + тести на кожен push
 ├── main.py                      # orchestration: CSV -> LLM -> output.json + report.md
 ├── classifier.py                 # виклик Gemini API, retry-логіка, логування
+├── lambda_handler.py              # AWS Lambda: S3-подія -> класифікація -> результат в S3
 ├── schema.py                      # Pydantic-схема структурованого виводу
 ├── test_schema.py                  # юніт-тести схеми
 ├── test_classifier.py               # юніт-тести обробки помилок

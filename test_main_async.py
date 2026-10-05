@@ -8,12 +8,13 @@ import asyncio
 import json
 import threading
 import time
+from itertools import pairwise
 from unittest.mock import patch
 
 import pytest
 
 import main
-from main import get_max_concurrency, process_all_async
+from main import RateLimiter, get_max_concurrency, get_max_requests_per_minute, process_all_async
 from schema import RequestAnalysis
 
 
@@ -122,3 +123,51 @@ def test_partial_results_saved_on_runtime_error(tmp_path, monkeypatch):
 def test_get_max_concurrency(monkeypatch, value, expected):
     monkeypatch.setenv("MAX_CONCURRENCY", value)
     assert get_max_concurrency() == expected
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [("12", 12), ("1", 1), ("0", None), ("-5", None), ("abc", None), ("", None)],
+)
+def test_get_max_requests_per_minute(monkeypatch, value, expected):
+    monkeypatch.setenv("MAX_REQUESTS_PER_MINUTE", value)
+    assert get_max_requests_per_minute() == expected
+
+
+def test_rate_limiter_spaces_out_starts():
+    """При 600 запитах/хв (інтервал 0.1с) три виклики wait() мають
+    розтягнутись щонайменше на ~0.2с: перший одразу, інші з паузою."""
+
+    async def run() -> float:
+        limiter = RateLimiter(600)
+        start = time.perf_counter()
+        await asyncio.gather(limiter.wait(), limiter.wait(), limiter.wait())
+        return time.perf_counter() - start
+
+    assert asyncio.run(run()) >= 0.18
+
+
+def test_rate_limiter_disabled_does_not_wait():
+    async def run() -> float:
+        limiter = RateLimiter(None)
+        start = time.perf_counter()
+        await asyncio.gather(*(limiter.wait() for _ in range(50)))
+        return time.perf_counter() - start
+
+    assert asyncio.run(run()) < 0.05
+
+
+def test_process_all_respects_requests_per_minute():
+    """Старти запитів розподіляються за RPM, навіть якщо Semaphore пропускає всіх одразу."""
+    starts: list[float] = []
+
+    def fake(request_id, raw_text, channel):
+        starts.append(time.perf_counter())
+        return _ok(request_id)
+
+    with patch("main.classify_request", side_effect=fake):
+        asyncio.run(process_all_async(_rows(4), max_concurrency=4, requests_per_minute=600))
+
+    starts.sort()
+    gaps = [b - a for a, b in pairwise(starts)]
+    assert all(g >= 0.08 for g in gaps)

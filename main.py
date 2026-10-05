@@ -181,9 +181,54 @@ def get_max_concurrency() -> int:
         return DEFAULT_MAX_CONCURRENCY
 
 
+def get_max_requests_per_minute() -> int | None:
+    """Повертає ліміт стартів запитів на хвилину (RPM) або None, якщо
+    обмеження не задано.
+
+    Береться зі змінної середовища MAX_REQUESTS_PER_MINUTE. Для
+    безкоштовного тіру Gemini (~15 RPM) безпечне значення - 12. Для
+    платного тарифу змінну можна не задавати.
+
+    Returns:
+        Додатне ціле число або None (без обмеження).
+    """
+    raw = os.environ.get("MAX_REQUESTS_PER_MINUTE", "")
+    try:
+        value = int(raw)
+    except ValueError:
+        if raw:
+            logger.warning(f"MAX_REQUESTS_PER_MINUTE='{raw}' некоректне, обмеження вимкнено.")
+        return None
+    return value if value > 0 else None
+
+
+class RateLimiter:
+    """Рівномірно розподіляє старти запитів у часі (не більше N на хвилину).
+
+    Кожен виклик wait() резервує найближчий вільний слот: слоти йдуть із
+    інтервалом 60/N секунд. Резервування відбувається синхронно (без await
+    всередині), тому в asyncio воно атомарне й не потребує Lock.
+    """
+
+    def __init__(self, requests_per_minute: int | None) -> None:
+        self._interval = 60.0 / requests_per_minute if requests_per_minute else 0.0
+        self._next_slot = 0.0
+
+    async def wait(self) -> None:
+        """Чекає свого слота; якщо ліміт не задано - повертається одразу."""
+        if self._interval <= 0:
+            return
+        now = time.monotonic()
+        start = max(now, self._next_slot)
+        self._next_slot = start + self._interval
+        if start > now:
+            await asyncio.sleep(start - now)
+
+
 async def process_all_async(
     requests: list[dict[str, str]],
     max_concurrency: int | None = None,
+    requests_per_minute: int | None = None,
 ) -> list[dict[str, Any]]:
     """Паралельно класифікує всі запити (asyncio.gather + Semaphore).
 
@@ -204,6 +249,8 @@ async def process_all_async(
         requests: Список валідних рядків із load_requests().
         max_concurrency: Ліміт одночасних запитів. Якщо None - береться
             з get_max_concurrency().
+        requests_per_minute: Ліміт стартів запитів на хвилину. Якщо None -
+            береться з get_max_requests_per_minute(); 0 вимикає обмеження.
 
     Returns:
         Список результатів у порядку вхідних запитів.
@@ -213,12 +260,15 @@ async def process_all_async(
     """
     limit = max_concurrency if max_concurrency is not None else get_max_concurrency()
     semaphore = asyncio.Semaphore(max(1, limit))
+    rpm = requests_per_minute if requests_per_minute is not None else get_max_requests_per_minute()
+    limiter = RateLimiter(rpm)
     abort = asyncio.Event()
     total = len(requests)
     slots: list[dict[str, Any] | None] = [None] * total
     first_error: RuntimeError | None = None
 
-    logger.info(f"Паралельна обробка: {total} запитів, одночасно не більше {limit}.")
+    rpm_info = f", не більше {rpm} стартів/хв" if rpm else ""
+    logger.info(f"Паралельна обробка: {total} запитів, одночасно не більше {limit}{rpm_info}.")
 
     async def worker(index: int, row: dict[str, str]) -> None:
         nonlocal first_error
@@ -228,6 +278,10 @@ async def process_all_async(
 
             req_id = row["id"]
             channel = row["channel"]
+
+            await limiter.wait()
+            if abort.is_set():
+                return
             logger.info(f"[{index + 1}/{total}] Обробка {req_id}...")
 
             try:

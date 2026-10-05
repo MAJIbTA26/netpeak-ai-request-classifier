@@ -22,6 +22,7 @@ from classifier import classify_request  # noqa: F401 (потрібен для p
 from main import build_report, load_requests, process_all_async, save_output
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+logging.getLogger().setLevel(logging.INFO)  # Lambda вже має handler, тож basicConfig рівень не ставить
 logger = logging.getLogger(__name__)
 
 s3 = boto3.client("s3")
