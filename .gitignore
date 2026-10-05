@@ -3,3 +3,9 @@ __pycache__/
 venv/
 .env
 .pytest_cache/
+
+package/
+deployment.zip
+.env
+output.json
+report.md
