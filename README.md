@@ -48,6 +48,25 @@ python main.py
 - `output.json` — повний структурований результат по всіх запитах
 - `report.md` — короткий звіт з агрегатами
 
+### Запуск у Docker
+
+Альтернатива локальному запуску: застосунок працює в контейнері з тим самим
+середовищем (`python:3.13-slim`) на будь-якому комп'ютері.
+
+```bash
+docker build -t request-classifier .
+docker run --rm --env-file .env -v "$PWD/data:/data" request-classifier
+```
+
+(у PowerShell замість `$PWD` використовуй `${PWD}`)
+
+- Вхідний `input_requests.csv` кладеться в папку `data/`. Туди ж контейнер
+  записує `output.json` та `report.md`.
+- Секрети передаються під час запуску через `--env-file` і **не потрапляють
+  в образ**: `.env` виключено через `.dockerignore`.
+- Код копіюється в `/app`, а робоча папка `/data` монтується з хоста, тому
+  результати лишаються на комп'ютері після завершення контейнера.
+
 ## Розгортання на AWS (serverless-конвеєр)
 
 ```
@@ -331,10 +350,11 @@ RESOURCE_EXHAUSTED` (денна квота, не хвилинна!) — вирі
 1. **Підтвердження в Telegram** (human-in-the-loop) — кнопки «Прийняти» /
    «Змінити відділ» / «Відхилити» під кожним запитом, обробник відповідей
    через Lambda Function URL.
-2. **Docker-образ** — для відтворюваного запуску.
-3. **Infrastructure as Code** (AWS SAM або Terraform) — замість ручного
+2. **Infrastructure as Code** (AWS SAM або Terraform) — замість ручного
    налаштування бакетів, ролі та тригера в консолі.
-4. **Dead-letter queue та алерти** на помилки Lambda (SQS DLQ + CloudWatch Alarm).
+3. **Dead-letter queue та алерти** на помилки Lambda (SQS DLQ + CloudWatch Alarm).
+4. **Lambda з контейнерного образу** — використати той самий Docker-образ
+   замість збірки zip-архіву вручну.
 5. Оновлення колонки «Статус роботи» в Google Sheets після підтвердження запиту
    в Telegram.
 
@@ -359,6 +379,8 @@ netpeak-test-task/
 ├── input_requests.csv                # вхідні дані (надані)
 ├── pyproject.toml                     # метадані пакету, залежності, ruff-конфіг
 ├── requirements.txt
+├── Dockerfile                        # образ для запуску в контейнері
+├── .dockerignore                     # що не потрапляє в образ (.env, package/ тощо)
 ├── .env.example
 └── README.md
 ```
