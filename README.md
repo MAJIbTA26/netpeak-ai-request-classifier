@@ -1,4 +1,4 @@
-# Request Classifier — тестове завдання Netpeak AI Solutions
+# Request Classifier — serverless AI-конвеєр для обробки запитів (AWS + Gemini)
 
 Python-сервіс, який читає вхідний "інбокс" запитів у вільній формі,
 класифікує кожен запит через LLM (Gemini) у строгу структуру, і формує
@@ -7,6 +7,10 @@ Python-сервіс, який читає вхідний "інбокс" запи�
 Працює у двох режимах: **локально** (`python main.py`) та як **serverless-конвеєр
 на AWS** (S3 → Lambda → Gemini API → S3): завантажуєш CSV у бакет, і результат
 з'являється у вихідному бакеті автоматично.
+
+Проєкт виріс із тестового завдання Netpeak AI Solutions у повноцінний сервіс:
+паралельна обробка (asyncio), Telegram-сповіщення, реєстр заявок у Google Sheets
+та запуск у Docker.
 
 ## Як запустити
 
@@ -274,12 +278,12 @@ pytest -v
 
 ## Структура схеми виводу
 
-Обов'язкові поля з завдання: `id`, `category`, `target_department`,
+Обов'язкові поля структури: `id`, `category`, `target_department`,
 `priority`, `short_summary`, `requested_actions`, `needs_clarification`.
 
 **Розширення схеми:** додано поле `processing_status` (`"ok"` / `"failed"`).
 
-**Чому:** завдання explicit вимагає "коректно обробляти випадки, коли
+**Чому:** сервіс має "коректно обробляти випадки, коли
 модель повернула невалідні дані". Кожен запит, який не вдалось коректно
 обробити навіть після повторних спроб, все одно потрапляє в
 `output.json` і `report.md`, але з чітким маркером
@@ -361,7 +365,7 @@ RESOURCE_EXHAUSTED` (денна квота, не хвилинна!) — вирі
 ## Структура проєкту
 
 ```
-netpeak-test-task/
+netpeak-ai-request-classifier/
 ├── .github/workflows/ci.yml    # CI: lint + тести на кожен push
 ├── main.py                      # orchestration: CSV -> LLM -> output.json + report.md
 ├── classifier.py                 # виклик Gemini API, retry-логіка, логування
