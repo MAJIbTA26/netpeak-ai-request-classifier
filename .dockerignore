@@ -1,0 +1,8 @@
+.env
+package/
+deployment.zip
+.git
+__pycache__
+data/
+output.json
+report.md
