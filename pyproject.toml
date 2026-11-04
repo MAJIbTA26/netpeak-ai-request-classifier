@@ -27,3 +27,5 @@ line-length = 120
 
 [tool.pytest.ini_options]
 norecursedirs = ["package", "package_old", ".git", "venv", ".venv"]
+pythonpath = ["."]
+testpaths = ["tests"]
