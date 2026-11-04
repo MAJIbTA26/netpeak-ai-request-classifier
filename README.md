@@ -277,25 +277,25 @@ runs(id, source_file, started_at, total, failed)
 
 Проєкт покритий **83 автотестами** (`pytest`) кількох типів:
 
-- **Юніт-тести** (`test_schema.py`, `test_classifier.py`) — перевіряють
+- **Юніт-тести** (`tests/test_schema.py`, `tests/test_classifier.py`) — перевіряють
   окремі функції ізольовано: валідацію Pydantic-схеми, розпізнавання
   типів помилок API, парсинг часу очікування з тексту помилки Google.
-- **Інтеграційні тести** (`test_classifier_integration.py`) — перевіряють
+- **Інтеграційні тести** (`tests/test_classifier_integration.py`) — перевіряють
   **повний цикл** `classify_request()` з мокованим `genai.Client`:
   успішну класифікацію, повний провал усіх спроб з переходом у
   `processing_status="failed"`, і реалістичний сценарій "перша спроба
   невдала, друга успішна".
 
-- **Тести запису в Google Sheets** (`test_sheets_logger.py`) — формування рядків,
+- **Тести запису в Google Sheets** (`tests/test_sheets_logger.py`) — формування рядків,
   автоматичні заголовки, append-запит, робота без налаштувань, відсутність
   винятків при збоях Google.
-- **Тести Telegram-сповіщень** (`test_telegram_notifier.py`) — форматування,
+- **Тести Telegram-сповіщень** (`tests/test_telegram_notifier.py`) — форматування,
   розбиття довгих повідомлень, маршрутизація по відділах, повтор при `429`,
   відсутність витоку токена в помилках.
-- **Тести паралельної обробки** (`test_main_async.py`) — порядок результатів,
+- **Тести паралельної обробки** (`tests/test_main_async.py`) — порядок результатів,
   дотримання ліміту `Semaphore` та RPM, збереження часткових результатів
   при критичній помилці.
-- **Тести SQL-бази** (`test_db.py`) — запис запуску й рядків, транзакція з
+- **Тести SQL-бази** (`tests/test_db.py`) — запис запуску й рядків, транзакція з
   відкатом, `FOREIGN KEY` та `CHECK`, робота без `DB_PATH`, SQL-статистика
   у звіті.
 
@@ -420,13 +420,14 @@ netpeak-ai-request-classifier/
 ├── telegram_notifier.py               # Telegram-сповіщення (підсумок + відділи)
 ├── lambda_handler.py              # AWS Lambda: S3-подія -> класифікація -> результат в S3
 ├── schema.py                      # Pydantic-схема структурованого виводу
-├── test_schema.py                  # юніт-тести схеми
-├── test_classifier.py               # юніт-тести обробки помилок
-├── test_sheets_logger.py              # тести запису в Google Sheets
-├── test_telegram_notifier.py          # тести Telegram-сповіщень
-├── test_main_async.py                # тести паралельної обробки (asyncio)
-├── test_db.py                         # тести SQL-бази
-├── test_classifier_integration.py    # інтеграційні тести з mock genai.Client
+├── tests/
+│   ├── test_schema.py                    # юніт-тести схеми
+│   ├── test_classifier.py                # юніт-тести обробки помилок
+│   ├── test_sheets_logger.py             # тести запису в Google Sheets
+│   ├── test_telegram_notifier.py         # тести Telegram-сповіщень
+│   ├── test_main_async.py                # тести паралельної обробки (asyncio)
+│   ├── test_db.py                        # тести SQL-бази
+│   └── test_classifier_integration.py    # інтеграційні тести з mock genai.Client
 ├── input_requests.csv                # вхідні дані (надані)
 ├── pyproject.toml                     # метадані пакету, залежності, ruff-конфіг
 ├── requirements.txt
