@@ -9,8 +9,8 @@ Python-сервіс, який читає вхідний "інбокс" запи�
 з'являється у вихідному бакеті автоматично.
 
 Проєкт виріс із тестового завдання Netpeak AI Solutions у повноцінний сервіс:
-паралельна обробка (asyncio), Telegram-сповіщення, реєстр заявок у Google Sheets
-та запуск у Docker.
+паралельна обробка (asyncio), Telegram-сповіщення, реєстр заявок у Google Sheets,
+збереження результатів у SQLite з SQL-статистикою та запуск у Docker.
 
 ## Як запустити
 
@@ -83,7 +83,7 @@ CSV  ──►  S3 (input)  ──event .csv──►  Lambda  ──►  Gemini
 
 Завантаження файлу `*.csv` у вхідний S3-бакет автоматично запускає Lambda-функцію
 (`lambda_handler.py`, Python 3.13). Вона завантажує файл у `/tmp`, виконує ту саму
-логіку, що й `main.py` (`load_requests` → `process_all` → `save_output` /
+логіку, що й `main.py` (`load_requests` → `process_all_async` → `save_output` /
 `build_report`), і зберігає `*_output.json` та `*_report.md` у вихідний бакет
 у папку `results/`.
 
@@ -93,7 +93,7 @@ CSV  ──►  S3 (input)  ──event .csv──►  Lambda  ──►  Gemini
 |---|---|
 | **S3** | два бакети: вхідний та вихідний |
 | **Event notification** | `s3:ObjectCreated:Put/Post` з фільтром суфікса `.csv` → Lambda |
-| **Lambda** | Python 3.13, x86_64, handler `lambda_handler.lambda_handler`, збільшений timeout і пам'ять (виклики LLM послідовні) |
+| **Lambda** | Python 3.13, x86_64, handler `lambda_handler.lambda_handler`, збільшений timeout і пам'ять (запити обробляються паралельно) |
 | **Змінні середовища** | `GEMINI_API_KEY`, `OUTPUT_BUCKET`; опційно `MAX_CONCURRENCY`, `MAX_REQUESTS_PER_MINUTE` (див. «Паралельна обробка»), `TELEGRAM_*` (див. «Telegram-сповіщення») та `GOOGLE_*` (див. «Реєстр у Google Sheets») |
 | **IAM-роль** | мінімальні привілеї: `s3:GetObject` / `s3:ListBucket` на вхідний бакет, `s3:PutObject` на вихідний, логи в CloudWatch |
 | **Логи** | CloudWatch Logs |
@@ -110,7 +110,8 @@ pip install -r requirements.txt --target package \
 ```
 
 Далі скопіюй у `package/` файли `main.py`, `classifier.py`, `schema.py`,
-`lambda_handler.py` та заархівуй **вміст** папки (файли мають бути в корені архіву,
+`lambda_handler.py`, `sheets_logger.py`, `telegram_notifier.py` та `db.py`
+(`main.py` імпортує `db`, без нього Lambda не запуститься) і заархівуй **вміст** папки (файли мають бути в корені архіву,
 а не всередині підпапки) у `deployment.zip` і завантаж його у Lambda
 (до 50 МБ через консоль).
 
@@ -234,9 +235,47 @@ LLM. Блокуюча `classify_request()` (з усім retry/fallback) вико
 формули. Якщо запис не налаштовано або Google повернув помилку, конвеєр працює
 далі, а проблема лише логується.
 
+## SQL-база результатів (SQLite)
+
+Після обробки результати можна зберігати в SQLite (`db.py`) і рахувати по них
+статистику SQL-запитами. Модуль необов'язковий: вмикається змінною `DB_PATH`,
+а без неї нічого не робить. Збій бази не ламає обробку: помилка лише логується,
+результати все одно лежать в `output.json`.
+
+```
+DB_PATH=requests.db   # у .env
+python main.py
+```
+
+Схема: дві таблиці зі зв'язком «один до багатьох».
+
+```
+runs(id, source_file, started_at, total, failed)
+  └──< results(id, run_id → runs.id, request_id, channel, category,
+               target_department, priority, short_summary,
+               requested_actions, needs_clarification, processing_status)
+```
+
+- Один запуск обробки файлу = один рядок у `runs` і N рядків у `results`.
+- Запуск записується **однією транзакцією**: або всі рядки, або нічого.
+- Обмеження в схемі: `FOREIGN KEY`, `CHECK` для `priority` і `processing_status`.
+- Запити виконуються з параметрами (`?`), а не склеюванням рядків.
+
+Після запису в кінець `report.md` дописується розділ «Статистика з бази (SQL)»:
+розподіл за категоріями (`GROUP BY`), запити з пріоритетом `high` по відділах
+та історія останніх запусків (`LEFT JOIN` + `GROUP BY`). Приклади запитів для
+самостійної практики лежать у [`queries.sql`](queries.sql).
+
+У Docker файл бази створюється в робочій папці `/data`, тобто лишається на
+комп'ютері в змонтованій папці `data/`.
+
+> **Обмеження:** у Lambda цей модуль не викликається, бо файл SQLite не
+> зберігається між запусками. Для хмарної версії потрібна окрема база
+> (наприклад, PostgreSQL на RDS).
+
 ## Тестування
 
-Проєкт покритий **65 автотестами** (`pytest`) чотирьох типів:
+Проєкт покритий **83 автотестами** (`pytest`) кількох типів:
 
 - **Юніт-тести** (`test_schema.py`, `test_classifier.py`) — перевіряють
   окремі функції ізольовано: валідацію Pydantic-схеми, розпізнавання
@@ -256,12 +295,15 @@ LLM. Блокуюча `classify_request()` (з усім retry/fallback) вико
 - **Тести паралельної обробки** (`test_main_async.py`) — порядок результатів,
   дотримання ліміту `Semaphore` та RPM, збереження часткових результатів
   при критичній помилці.
+- **Тести SQL-бази** (`test_db.py`) — запис запуску й рядків, транзакція з
+  відкатом, `FOREIGN KEY` та `CHECK`, робота без `DB_PATH`, SQL-статистика
+  у звіті.
 
 ```bash
 pytest -v
 ```
 
-Очікуваний результат: **65 passed**.
+Очікуваний результат: **83 passed**.
 
 ## Логування
 
@@ -361,6 +403,8 @@ RESOURCE_EXHAUSTED` (денна квота, не хвилинна!) — вирі
    замість збірки zip-архіву вручну.
 5. Оновлення колонки «Статус роботи» в Google Sheets після підтвердження запиту
    в Telegram.
+6. **PostgreSQL + Docker Compose** замість SQLite: застосунок і база в одному
+   `docker-compose.yml`, а в хмарі — RDS.
 
 ## Структура проєкту
 
@@ -371,6 +415,8 @@ netpeak-ai-request-classifier/
 ├── classifier.py                 # виклик Gemini API, retry-логіка, логування
 ├── apps_script/Code.js                # скрипт для таблиці (запис через Apps Script)
 ├── sheets_logger.py                   # реєстр запитів у Google Sheets
+├── db.py                              # збереження в SQLite + SQL-статистика для звіту
+├── queries.sql                        # приклади SQL-запитів до бази
 ├── telegram_notifier.py               # Telegram-сповіщення (підсумок + відділи)
 ├── lambda_handler.py              # AWS Lambda: S3-подія -> класифікація -> результат в S3
 ├── schema.py                      # Pydantic-схема структурованого виводу
@@ -379,6 +425,7 @@ netpeak-ai-request-classifier/
 ├── test_sheets_logger.py              # тести запису в Google Sheets
 ├── test_telegram_notifier.py          # тести Telegram-сповіщень
 ├── test_main_async.py                # тести паралельної обробки (asyncio)
+├── test_db.py                         # тести SQL-бази
 ├── test_classifier_integration.py    # інтеграційні тести з mock genai.Client
 ├── input_requests.csv                # вхідні дані (надані)
 ├── pyproject.toml                     # метадані пакету, залежності, ruff-конфіг

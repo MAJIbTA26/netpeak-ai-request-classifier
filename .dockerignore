@@ -6,3 +6,5 @@ __pycache__
 data/
 output.json
 report.md
+*.db
+package_old/

@@ -10,3 +10,4 @@ deployment.zip
 output.json
 report.md
 data/
+*.db
