@@ -10,6 +10,26 @@ jobs:
   test:
     runs-on: ubuntu-latest
 
+    # PostgreSQL для тестів db.py. Контейнер тимчасовий: живе лише під час цього запуску,
+    # тож пароль нижче не є секретом (це не реальна база).
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: classifier
+          POSTGRES_PASSWORD: ci_only_password
+          POSTGRES_DB: classifier
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U classifier -d classifier"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      TEST_DATABASE_URL: postgresql://classifier:ci_only_password@127.0.0.1:5432/classifier
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
