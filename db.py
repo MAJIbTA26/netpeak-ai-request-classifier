@@ -1,10 +1,14 @@
 """
-Збереження результатів класифікації в SQLite та SQL-статистика для звіту.
+Збереження результатів класифікації в PostgreSQL та SQL-статистика для звіту.
 
 Модуль необов'язковий (як sheets_logger і telegram_notifier): вмикається
-змінною середовища DB_PATH. Якщо вона не задана - нічого не відбувається.
+змінною середовища DATABASE_URL. Якщо вона не задана - нічого не відбувається.
 Помилки бази не валять основний конвеєр: вони логуються, а результати
 все одно лишаються в output.json.
+
+Приклад DATABASE_URL (локально, база з docker-compose.yml):
+
+    postgresql://classifier:ПАРОЛЬ@localhost:5432/classifier
 
 Схема (дві таблиці, зв'язок "один до багатьох"):
 
@@ -14,39 +18,37 @@
 
 Один запуск обробки файлу = один рядок у runs і N рядків у results.
 
-Підключення в main.py (після save_output/build_report):
-
-    from db import append_stats_to_report, save_results
-
-    run_id = save_results(results, INPUT_FILE)
-    if run_id is not None:
-        append_stats_to_report(REPORT_FILE, run_id)
-
-Друга функція дописує в report.md розділ "Статистика з бази (SQL)":
-розподіл за категоріями, high-запити по відділах та історію останніх запусків.
+Відмінності від попередньої SQLite-версії:
+    - плейсхолдери %s замість ?;
+    - id: GENERATED ALWAYS AS IDENTITY, а новий id повертає INSERT ... RETURNING;
+    - справжні типи: BOOLEAN, TIMESTAMPTZ, JSONB замість INTEGER 0/1 і TEXT;
+    - підрахунок помилок: COUNT(*) FILTER (WHERE ...), бо сума булевих у PostgreSQL неможлива.
 """
 
-import json
 import logging
 import os
-import sqlite3
 from datetime import datetime, timezone
 from typing import Any
 
+import psycopg
+from psycopg.types.json import Jsonb
+
 logger = logging.getLogger(__name__)
+
+CONNECT_TIMEOUT_SECONDS = 5
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS runs (
-    id           INTEGER PRIMARY KEY AUTOINCREMENT,
-    source_file  TEXT    NOT NULL,
-    started_at   TEXT    NOT NULL,
-    total        INTEGER NOT NULL,
-    failed       INTEGER NOT NULL DEFAULT 0
+    id           BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    source_file  TEXT        NOT NULL,
+    started_at   TIMESTAMPTZ NOT NULL,
+    total        INTEGER     NOT NULL,
+    failed       INTEGER     NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS results (
-    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
-    run_id              INTEGER NOT NULL,
+    id                  BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    run_id              BIGINT  NOT NULL REFERENCES runs (id),
     request_id          TEXT    NOT NULL,
     channel             TEXT,
     request_timestamp   TEXT,
@@ -55,12 +57,10 @@ CREATE TABLE IF NOT EXISTS results (
     priority            TEXT    NOT NULL
                         CHECK (priority IN ('low', 'medium', 'high')),
     short_summary       TEXT    NOT NULL,
-    requested_actions   TEXT    NOT NULL DEFAULT '[]',
-    needs_clarification INTEGER NOT NULL DEFAULT 0
-                        CHECK (needs_clarification IN (0, 1)),
+    requested_actions   JSONB   NOT NULL DEFAULT '[]'::jsonb,
+    needs_clarification BOOLEAN NOT NULL DEFAULT FALSE,
     processing_status   TEXT    NOT NULL
-                        CHECK (processing_status IN ('ok', 'failed')),
-    FOREIGN KEY (run_id) REFERENCES runs (id)
+                        CHECK (processing_status IN ('ok', 'failed'))
 );
 
 CREATE INDEX IF NOT EXISTS idx_results_run_id   ON results (run_id);
@@ -69,7 +69,8 @@ CREATE INDEX IF NOT EXISTS idx_results_category ON results (category);
 
 INSERT_RUN = """
 INSERT INTO runs (source_file, started_at, total, failed)
-VALUES (?, ?, ?, ?)
+VALUES (%s, %s, %s, %s)
+RETURNING id
 """
 
 INSERT_RESULT = """
@@ -77,7 +78,7 @@ INSERT INTO results (
     run_id, request_id, channel, request_timestamp, category,
     target_department, priority, short_summary, requested_actions,
     needs_clarification, processing_status
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
 """
 
 # --- Запити для статистики (DQL) --------------------------------------------
@@ -86,7 +87,7 @@ INSERT INTO results (
 STATS_BY_CATEGORY = """
 SELECT category, COUNT(*) AS cnt
 FROM results
-WHERE run_id = ?
+WHERE run_id = %s
 GROUP BY category
 ORDER BY cnt DESC, category
 """
@@ -97,31 +98,37 @@ SELECT
     CASE WHEN target_department = '' THEN 'не визначено' ELSE target_department END AS department,
     COUNT(*) AS cnt
 FROM results
-WHERE run_id = ? AND priority = 'high'
+WHERE run_id = %s AND priority = 'high'
 GROUP BY department
 ORDER BY cnt DESC, department
 """
 
 # LEFT JOIN + GROUP BY: останні запуски та скільки в кожному запитів / помилок.
 # LEFT JOIN не губить запуск, навіть якщо до нього немає жодного результату.
+# COUNT(*) FILTER (WHERE ...) - умовний підрахунок (аналог SUM(умова) у SQLite).
 STATS_RECENT_RUNS = """
 SELECT
     r.id,
     r.source_file,
     r.started_at,
     COUNT(x.id) AS total,
-    COALESCE(SUM(x.processing_status = 'failed'), 0) AS failed
+    COUNT(x.id) FILTER (WHERE x.processing_status = 'failed') AS failed
 FROM runs AS r
 LEFT JOIN results AS x ON x.run_id = r.id
 GROUP BY r.id, r.source_file, r.started_at
 ORDER BY r.id DESC
-LIMIT ?
+LIMIT %s
 """
 
 
-def init_db(conn: sqlite3.Connection) -> None:
+def get_database_url(db_url: str | None = None) -> str | None:
+    """Повертає рядок підключення: переданий явно або зі змінної DATABASE_URL."""
+    return db_url or os.getenv("DATABASE_URL") or None
+
+
+def init_db(conn: psycopg.Connection) -> None:
     """Створює таблиці та індекси, якщо їх ще немає (DDL)."""
-    conn.executescript(SCHEMA)
+    conn.execute(SCHEMA)
 
 
 def _row_values(run_id: int, result: dict[str, Any]) -> tuple:
@@ -135,8 +142,8 @@ def _row_values(run_id: int, result: dict[str, Any]) -> tuple:
         result.get("target_department") or "",
         result["priority"],
         result["short_summary"],
-        json.dumps(result.get("requested_actions") or [], ensure_ascii=False),
-        1 if result.get("needs_clarification") else 0,
+        Jsonb(result.get("requested_actions") or []),
+        bool(result.get("needs_clarification")),
         result.get("processing_status", "ok"),
     )
 
@@ -144,48 +151,44 @@ def _row_values(run_id: int, result: dict[str, Any]) -> tuple:
 def save_results(
     results: list[dict[str, Any]],
     source_file: str,
-    db_path: str | None = None,
+    db_url: str | None = None,
 ) -> int | None:
     """Зберігає один запуск обробки в базу.
 
     Args:
         results: Список результатів із process_all_async() (словники).
         source_file: Назва вхідного файлу (для таблиці runs).
-        db_path: Шлях до SQLite-файлу. Якщо не задано - береться зі
-            змінної середовища DB_PATH. Якщо її теж немає - модуль вимкнено.
+        db_url: Рядок підключення до PostgreSQL. Якщо не задано - береться зі
+            змінної середовища DATABASE_URL. Якщо її теж немає - модуль вимкнено.
 
     Returns:
         id створеного запуску (runs.id), або None, якщо базу вимкнено,
         результатів немає або сталась помилка.
     """
-    db_path = db_path or os.getenv("DB_PATH")
-    if not db_path:
-        logger.info("DB_PATH не задано, збереження в базу пропущено.")
+    db_url = get_database_url(db_url)
+    if not db_url:
+        logger.info("DATABASE_URL не задано, збереження в базу пропущено.")
         return None
     if not results:
         logger.info("Немає результатів для збереження в базу.")
         return None
 
     failed = sum(1 for r in results if r.get("processing_status") == "failed")
-    started_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    started_at = datetime.now(timezone.utc)
 
     try:
-        conn = sqlite3.connect(db_path)
-        try:
-            conn.execute("PRAGMA foreign_keys = ON")
+        # Блок with: COMMIT при успіху, ROLLBACK при будь-якому винятку, потім закриття.
+        # Тож або записуємо весь запуск, або нічого.
+        with psycopg.connect(db_url, connect_timeout=CONNECT_TIMEOUT_SECONDS) as conn:
             init_db(conn)
-            # Одна транзакція: або записуємо весь запуск, або нічого.
-            with conn:
-                cursor = conn.execute(INSERT_RUN, (source_file, started_at, len(results), failed))
-                run_id = cursor.lastrowid
-                conn.executemany(INSERT_RESULT, [_row_values(run_id, r) for r in results])
-        finally:
-            conn.close()
-    except (sqlite3.Error, KeyError) as e:
+            run_id = conn.execute(INSERT_RUN, (source_file, started_at, len(results), failed)).fetchone()[0]
+            with conn.cursor() as cur:
+                cur.executemany(INSERT_RESULT, [_row_values(run_id, r) for r in results])
+    except (psycopg.Error, KeyError) as e:
         logger.error(f"Не вдалося зберегти результати в базу: {e}")
         return None
 
-    logger.info(f"Збережено в базу {db_path}: запуск #{run_id}, {len(results)} рядків.")
+    logger.info(f"Збережено в базу: запуск #{run_id}, {len(results)} рядків.")
     return run_id
 
 
@@ -201,30 +204,27 @@ def _md_table(header: list[str], rows: list[tuple]) -> list[str]:
     return lines
 
 
-def build_stats_section(run_id: int, db_path: str | None = None, history_limit: int = 5) -> str | None:
+def build_stats_section(run_id: int, db_url: str | None = None, history_limit: int = 5) -> str | None:
     """Формує Markdown-розділ зі статистикою, порахованою SQL-запитами.
 
     Args:
         run_id: id запуску (runs.id), для якого рахується статистика.
-        db_path: Шлях до SQLite-файлу (за замовчуванням - змінна DB_PATH).
+        db_url: Рядок підключення (за замовчуванням - змінна DATABASE_URL).
         history_limit: Скільки останніх запусків показати в історії.
 
     Returns:
-        Текст розділу або None, якщо базу вимкнено, файлу немає чи сталась помилка.
+        Текст розділу або None, якщо базу вимкнено чи сталась помилка.
     """
-    db_path = db_path or os.getenv("DB_PATH")
-    if not db_path or not os.path.exists(db_path):
+    db_url = get_database_url(db_url)
+    if not db_url:
         return None
 
     try:
-        conn = sqlite3.connect(db_path)
-        try:
+        with psycopg.connect(db_url, connect_timeout=CONNECT_TIMEOUT_SECONDS) as conn:
             by_category = conn.execute(STATS_BY_CATEGORY, (run_id,)).fetchall()
             high_by_department = conn.execute(STATS_HIGH_BY_DEPARTMENT, (run_id,)).fetchall()
             recent_runs = conn.execute(STATS_RECENT_RUNS, (history_limit,)).fetchall()
-        finally:
-            conn.close()
-    except sqlite3.Error as e:
+    except psycopg.Error as e:
         logger.error(f"Не вдалося порахувати SQL-статистику: {e}")
         return None
 
@@ -244,14 +244,14 @@ def build_stats_section(run_id: int, db_path: str | None = None, history_limit: 
     history = []
     for rid, source_file, started_at, total, failed in recent_runs:
         pct = f"{100 * failed / total:.1f}%" if total else "-"
-        history.append((f"#{rid}", source_file, started_at, total, failed, pct))
+        history.append((f"#{rid}", source_file, started_at.strftime("%Y-%m-%d %H:%M:%S"), total, failed, pct))
     lines += [f"### Останні запуски (до {history_limit})", ""]
     lines += _md_table(["Запуск", "Файл", "Час (UTC)", "Запитів", "Не вдалося", "Частка помилок"], history)
 
     return "\n".join(lines)
 
 
-def append_stats_to_report(report_path: str, run_id: int, db_path: str | None = None) -> bool:
+def append_stats_to_report(report_path: str, run_id: int, db_url: str | None = None) -> bool:
     """Дописує SQL-статистику в кінець Markdown-звіту.
 
     Ніколи не піднімає виняток: помилка лише логується, а звіт лишається як був.
@@ -259,12 +259,12 @@ def append_stats_to_report(report_path: str, run_id: int, db_path: str | None = 
     Args:
         report_path: Шлях до report.md.
         run_id: id запуску, який щойно збережено (значення, що повернула save_results).
-        db_path: Шлях до SQLite-файлу (за замовчуванням - змінна DB_PATH).
+        db_url: Рядок підключення (за замовчуванням - змінна DATABASE_URL).
 
     Returns:
         True, якщо розділ дописано; False в інших випадках.
     """
-    section = build_stats_section(run_id, db_path)
+    section = build_stats_section(run_id, db_url)
     if section is None:
         return False
 

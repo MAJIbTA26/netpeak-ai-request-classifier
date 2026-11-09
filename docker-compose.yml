@@ -1,0 +1,27 @@
+# Локальна база PostgreSQL для Request Classifier.
+# Запуск:   docker compose up -d db
+# Зупинка:  docker compose down        (дані лишаються у volume)
+# Скинути всі дані: docker compose down -v
+#
+# Змінні POSTGRES_* беруться з файлу .env (його в Git немає).
+name: request-classifier
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-classifier}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Задай POSTGRES_PASSWORD у файлі .env}
+      POSTGRES_DB: ${POSTGRES_DB:-classifier}
+    ports:
+      - "127.0.0.1:5433:5432" # доступ лише з цього комп'ютера
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  pgdata:
