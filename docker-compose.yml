@@ -1,10 +1,14 @@
-# Локальна база PostgreSQL для Request Classifier.
-# Запуск:   docker compose up -d db
-# Зупинка:  docker compose down        (дані лишаються у volume)
-# Скинути всі дані: docker compose down -v
+# Request Classifier: PostgreSQL + HTTP API.
 #
-# Змінні POSTGRES_* беруться з файлу .env (його в Git немає).
+# Запуск усього:   docker compose up -d --build
+# Лише база:       docker compose up -d db
+# Логи API:        docker compose logs -f api
+# Зупинка:         docker compose down        (дані бази лишаються у volume)
+# Скинути дані:    docker compose down -v
+#
+# Змінні беруться з файлу .env (його в Git немає).
 name: request-classifier
+
 services:
   db:
     image: postgres:16-alpine
@@ -14,7 +18,7 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Задай POSTGRES_PASSWORD у файлі .env}
       POSTGRES_DB: ${POSTGRES_DB:-classifier}
     ports:
-      - "127.0.0.1:5433:5432" # доступ лише з цього комп'ютера
+      - "127.0.0.1:5433:5432" # доступ лише з цього комп'ютера (5433, бо 5432 на Windows може бути зайнятий)
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -22,6 +26,27 @@ services:
       interval: 5s
       timeout: 3s
       retries: 10
+
+  api:
+    build: .
+    restart: unless-stopped
+    command: ["python", "-m", "uvicorn", "api:app", "--host", "0.0.0.0", "--port", "8000", "--app-dir", "/app"]
+    environment:
+      # Передаємо лише те, що потрібно API (не весь .env з токенами Telegram тощо).
+      GEMINI_API_KEY: ${GEMINI_API_KEY:?Задай GEMINI_API_KEY у файлі .env}
+      # Усередині Compose база доступна за іменем сервісу db і портом 5432 (не 5433).
+      DATABASE_URL: postgresql://${POSTGRES_USER:-classifier}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-classifier}
+    ports:
+      - "127.0.0.1:8000:8000" # доступ лише з цього комп'ютера
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
 
 volumes:
   pgdata:
