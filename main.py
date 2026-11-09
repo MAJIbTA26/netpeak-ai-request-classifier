@@ -17,11 +17,10 @@ from typing import Any
 
 from dotenv import load_dotenv
 
-
 from classifier import classify_request
+from db import append_stats_to_report, save_results
 from sheets_logger import append_results
 from telegram_notifier import notify_results
-from db import append_stats_to_report, save_results
 
 # .env читається до першого виклику API: classifier бере GEMINI_API_KEY
 # з середовища лише всередині _get_client(), а не під час імпорту.
@@ -433,7 +432,7 @@ def main() -> None:
     run_id = save_results(results, INPUT_FILE)
     if run_id is not None:
         append_stats_to_report(REPORT_FILE, run_id)
-    
+
     logger.info("Готово!")
 
 

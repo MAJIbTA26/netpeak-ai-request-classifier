@@ -272,7 +272,8 @@ def append_results(results: list[dict[str, Any]], source_name: str) -> bool:
     except SheetsError as e:
         logger.error(f"Не вдалося записати в Google Sheets: {e}")
         return False
-    except Exception as e:  # будь-який збій Google (автентифікація, мережа) не має ламати конвеєр
+    except Exception as e:  # noqa: BLE001
+        # Будь-який збій Google (автентифікація, мережа) не має ламати конвеєр
         logger.error(f"Не вдалося записати в Google Sheets ({type(e).__name__}): {str(e)[:200]}")
         return False
 
