@@ -1,77 +1,145 @@
-# Request Classifier — serverless AI-конвеєр для обробки запитів (AWS + Gemini)
+# Request Classifier: AI request processing (FastAPI + PostgreSQL + n8n + AWS)
 
-Python-сервіс, який читає вхідний "інбокс" запитів у вільній формі,
-класифікує кожен запит через LLM (Gemini) у строгу структуру, і формує
-короткий агрегований звіт.
+🇺🇦 [Українська версія](README.uk.md)
 
-Працює у двох режимах: **локально** (`python main.py`) та як **serverless-конвеєр
-на AWS** (S3 → Lambda → Gemini API → S3): завантажуєш CSV у бакет, і результат
-з'являється у вихідному бакеті автоматично.
+A Python service that takes free-form requests, classifies each one with an LLM (Gemini) into a strict
+structure, stores the result in PostgreSQL, and alerts a manager in Telegram when a request is urgent.
+A human can always override the priority set by the AI, and the service tracks how often that happens.
 
-Проєкт виріс із тестового завдання Netpeak AI Solutions у повноцінний сервіс:
-паралельна обробка (asyncio), Telegram-сповіщення, реєстр заявок у Google Sheets,
-збереження результатів у SQLite з SQL-статистикою та запуск у Docker.
+The project grew from a Netpeak AI Solutions test task into a full service:
+CLI → tests and CI → AWS Lambda → asyncio → Telegram and Google Sheets → FastAPI → PostgreSQL →
+Docker Compose → n8n.
 
-## Як запустити
+## Features
 
-### 1. Встанови залежності
+- Returns structured JSON: category, department, priority (`low` / `medium` / `high`), short summary,
+  requested actions, and a "needs clarification" flag.
+- Three ways to run: **HTTP API** (FastAPI), **batch CSV processing** (`python main.py`), and
+  **serverless on AWS** (S3 → Lambda → S3).
+- Stores results in PostgreSQL.
+- **Human-in-the-loop:** a manager changes the priority through the API. The AI value is never
+  overwritten, and the change is recorded (who and when). `GET /stats/overrides` shows how often
+  humans disagree with the AI.
+- **Automation in n8n:** webhook → classify → if `high` → Telegram message.
+- Parallel processing (asyncio), a registry in Google Sheets, retries with exponential backoff.
+
+## Architecture
+
+```mermaid
+flowchart LR
+    S[Request source<br/>chat, email, form] -->|POST + secret| N[n8n workflow]
+    N -->|POST /classify + API key| A[FastAPI]
+    A -->|structured output| G[Gemini API]
+    A --> D[(PostgreSQL)]
+    N -->|priority = high| T[Telegram]
+    M[Manager] -->|PATCH /results/id/priority| A
+```
+
+Docker Compose runs three services: `db` (PostgreSQL 16), `api` (FastAPI), and `n8n`.
+All ports are bound to `127.0.0.1` only.
+
+## Quick start (Docker Compose)
+
+1. Copy `.env.example` to `.env` and fill in:
+   - `GEMINI_API_KEY`: a free key from [aistudio.google.com/apikey](https://aistudio.google.com/apikey)
+   - `POSTGRES_PASSWORD`: database password
+   - `API_KEY`: a long random string that protects the API
+   - `N8N_ENCRYPTION_KEY`: a random string (keep a backup, n8n credentials cannot be recovered without it)
+   - `N8N_VERSION`: n8n version (for example `2.47.3`)
+
+   Random string: `python -c "import secrets; print(secrets.token_urlsafe(32))"`
+
+2. Start everything:
+
+   ```bash
+   docker compose up -d --build
+   ```
+
+3. API and docs: <http://127.0.0.1:8000/docs>. Protected endpoints need the `X-API-Key` header.
+4. n8n: <http://127.0.0.1:5678>. Import `n8n/workflows/classify-and-alert.json` and create credentials:
+   Header Auth for the API (`X-API-Key`), Header Auth for the webhook (`X-Webhook-Secret`),
+   and a Telegram bot credential.
+
+## API
+
+| Method | Path | Description |
+|---|---|---|
+| GET | `/health` | Health check (no key needed) |
+| POST | `/classify` | Classify a request and save it. Returns the analysis and `record_id` |
+| GET | `/results/{id}` | Get a saved result (includes `effective_priority`) |
+| PATCH | `/results/{id}/priority` | Manager changes the priority (audit: who, when) |
+| GET | `/stats/overrides` | How many results were reviewed and changed (disagreement rate) |
+
+All endpoints except `/health` require `X-API-Key`. If `API_KEY` is not set on the server,
+protected endpoints are closed (fail-closed).
+
+```bash
+curl -X POST http://127.0.0.1:8000/classify \
+  -H "X-API-Key: $API_KEY" -H "Content-Type: application/json" \
+  -d '{"id": "REQ-1", "text": "The report export is broken, please fix it today", "channel": "Slack"}'
+```
+
+## Automation (n8n)
+
+Workflow `n8n/workflows/classify-and-alert.json`:
+
+```
+Webhook ──► HTTP Request (POST /classify) ──► IF priority = high ──true──► Telegram
+```
+
+- The webhook is protected by a secret in the `X-Webhook-Secret` header.
+- n8n calls the API by its internal address `http://api:8000` (containers reach each other by service name).
+- The n8n version is pinned (not `latest`), so an update cannot silently break workflows.
+
+## Design note: human priority override
+
+- The AI value (`priority`) is never overwritten. The manager's decision goes to `priority_override`,
+  while `overridden_by` and `overridden_at` record who and when.
+- Effective priority: `COALESCE(priority_override, priority)`. Statistics for `high` use it.
+- The disagreement rate (`changed / reviewed`) is feedback for improving the prompt.
+- Migration: `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`, so an existing database is upgraded without data loss.
+
+## Batch CSV processing
 
 ```bash
 pip install -r requirements.txt
-```
-
-Або через `pyproject.toml` (з dev-залежностями для тестів/lint):
-```bash
-pip install -e ".[dev]"
-```
-
-### 2. Отримай безкоштовний ключ Gemini API
-
-1. Зайди на [aistudio.google.com/apikey](https://aistudio.google.com/apikey)
-2. Увійди через Google-акаунт
-3. Створи ключ (безкоштовно, без картки)
-
-### 3. Задай ключ через .env
-
-```bash
-cp .env.example .env
-```
-
-Встав свій реальний ключ у `.env`:
-```
-GEMINI_API_KEY=твій_реальний_ключ
-```
-
-### 4. Запусти
-
-```bash
 python main.py
 ```
 
-Скрипт прочитає `input_requests.csv`, обробить кожен запит і створить:
-- `output.json` — повний структурований результат по всіх запитах
-- `report.md` — короткий звіт з агрегатами
+The script reads `input_requests.csv`, processes every request, and creates:
+- `output.json`: the full structured result
+- `report.md`: a short report with aggregates
 
-### Запуск у Docker
+If `DATABASE_URL` is set, results are also saved to PostgreSQL, and an SQL statistics section is
+appended to `report.md`.
 
-Альтернатива локальному запуску: застосунок працює в контейнері з тим самим
-середовищем (`python:3.13-slim`) на будь-якому комп'ютері.
+### Run in Docker (without Compose)
 
 ```bash
 docker build -t request-classifier .
 docker run --rm --env-file .env -v "$PWD/data:/data" request-classifier
 ```
 
-(у PowerShell замість `$PWD` використовуй `${PWD}`)
+(in PowerShell use `${PWD}` instead of `$PWD`). Put `input_requests.csv` into `data/`; the container
+writes results there. Secrets are passed with `--env-file` and never end up in the image
+(`.env` is excluded by `.dockerignore`).
 
-- Вхідний `input_requests.csv` кладеться в папку `data/`. Туди ж контейнер
-  записує `output.json` та `report.md`.
-- Секрети передаються під час запуску через `--env-file` і **не потрапляють
-  в образ**: `.env` виключено через `.dockerignore`.
-- Код копіюється в `/app`, а робоча папка `/data` монтується з хоста, тому
-  результати лишаються на комп'ютері після завершення контейнера.
+## Database (PostgreSQL)
 
-## Розгортання на AWS (serverless-конвеєр)
+```
+runs(id, source_file, started_at, total, failed)
+  └──< results(id, run_id → runs.id, request_id, channel, category,
+               target_department, priority, short_summary, requested_actions (JSONB),
+               needs_clarification, processing_status,
+               priority_override, overridden_by, overridden_at)
+```
+
+- One processing run is saved in **one transaction**: all rows or nothing.
+- Constraints: `FOREIGN KEY`, and `CHECK` for `priority`, `priority_override`, `processing_status`.
+- Queries are parameterized (`%s`), never built by string concatenation.
+- Sample SQL for practice: [`queries.sql`](queries.sql).
+
+## Deploy on AWS (serverless pipeline)
 
 ```
 CSV  ──►  S3 (input)  ──event .csv──►  Lambda  ──►  Gemini API
@@ -81,27 +149,22 @@ CSV  ──►  S3 (input)  ──event .csv──►  Lambda  ──►  Gemini
                                            results/<name>_report.md
 ```
 
-Завантаження файлу `*.csv` у вхідний S3-бакет автоматично запускає Lambda-функцію
-(`lambda_handler.py`, Python 3.13). Вона завантажує файл у `/tmp`, виконує ту саму
-логіку, що й `main.py` (`load_requests` → `process_all_async` → `save_output` /
-`build_report`), і зберігає `*_output.json` та `*_report.md` у вихідний бакет
-у папку `results/`.
+Uploading a `*.csv` file to the input bucket triggers the Lambda function (`lambda_handler.py`,
+Python 3.13). It runs the same logic as `main.py` and writes `*_output.json` and `*_report.md`
+to the output bucket.
 
-### Що налаштовано
-
-| Компонент | Налаштування |
+| Component | Setup |
 |---|---|
-| **S3** | два бакети: вхідний та вихідний |
-| **Event notification** | `s3:ObjectCreated:Put/Post` з фільтром суфікса `.csv` → Lambda |
-| **Lambda** | Python 3.13, x86_64, handler `lambda_handler.lambda_handler`, збільшений timeout і пам'ять (запити обробляються паралельно) |
-| **Змінні середовища** | `GEMINI_API_KEY`, `OUTPUT_BUCKET`; опційно `MAX_CONCURRENCY`, `MAX_REQUESTS_PER_MINUTE` (див. «Паралельна обробка»), `TELEGRAM_*` (див. «Telegram-сповіщення») та `GOOGLE_*` (див. «Реєстр у Google Sheets») |
-| **IAM-роль** | мінімальні привілеї: `s3:GetObject` / `s3:ListBucket` на вхідний бакет, `s3:PutObject` на вихідний, логи в CloudWatch |
-| **Логи** | CloudWatch Logs |
+| **S3** | two buckets: input and output |
+| **Event notification** | `s3:ObjectCreated:Put/Post` with suffix filter `.csv` → Lambda |
+| **Lambda** | Python 3.13, x86_64, handler `lambda_handler.lambda_handler`, larger timeout and memory |
+| **Environment variables** | `GEMINI_API_KEY`, `OUTPUT_BUCKET`; optional `MAX_CONCURRENCY`, `MAX_REQUESTS_PER_MINUTE`, `TELEGRAM_*`, `GOOGLE_*` |
+| **IAM role** | least privilege: `s3:GetObject` / `s3:ListBucket` on input, `s3:PutObject` on output, CloudWatch logs |
+| **Logs** | CloudWatch Logs |
 
-### Збірка пакета для Lambda
+### Build the Lambda package
 
-Залежності треба ставити для Linux, навіть якщо розробка йде на Windows
-(інакше в пакет потраплять `.pyd`-файли, які Lambda не завантажить):
+Install dependencies for Linux, even if you develop on Windows:
 
 ```bash
 pip install -r requirements.txt --target package \
@@ -109,330 +172,137 @@ pip install -r requirements.txt --target package \
     --python-version 3.13 --implementation cp
 ```
 
-Далі скопіюй у `package/` файли `main.py`, `classifier.py`, `schema.py`,
-`lambda_handler.py`, `sheets_logger.py`, `telegram_notifier.py` та `db.py`
-(`main.py` імпортує `db`, без нього Lambda не запуститься) і заархівуй **вміст** папки (файли мають бути в корені архіву,
-а не всередині підпапки) у `deployment.zip` і завантаж його у Lambda
-(до 50 МБ через консоль).
+Copy `main.py`, `classifier.py`, `schema.py`, `lambda_handler.py`, `sheets_logger.py`,
+`telegram_notifier.py`, and `db.py` into `package/` (`main.py` imports `db`). Zip the **contents**
+of the folder into `deployment.zip` and upload it to Lambda. `DATABASE_URL` is not set in Lambda,
+so database writes are disabled there.
 
-### Перевірка
+### Common problems
+
+- **Lambda does not start after an upload:** check the suffix filter in Event notifications.
+  An extra space (`" .csv"`) disables the trigger without any error. Check with
+  `aws s3api get-bucket-notification-configuration`.
+- **`API_KEY_INVALID`:** the key in `GEMINI_API_KEY` was entered incorrectly.
+- **`No module named ...` / `_cffi_backend`:** the package was built for Windows, not Linux.
+- **No log group in CloudWatch:** the function has not been invoked yet.
+
+> In production the key should be stored in AWS Secrets Manager, not in an environment variable.
+
+## Parallel processing (asyncio)
+
+`process_all_async()` runs requests with `asyncio.gather`, and a `Semaphore` limits concurrent LLM
+calls. The blocking `classify_request()` runs in threads (`asyncio.to_thread`). Result order matches
+the CSV order.
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `MAX_CONCURRENCY` | `3` | how many requests to Gemini run at once |
+| `MAX_REQUESTS_PER_MINUTE` | no limit | spreads request starts evenly; `12` fits the free tier (~15 RPM) |
+
+On a critical authorization error new requests are not started, and already processed results are kept.
+
+## Telegram notifications (batch mode)
+
+After processing, `telegram_notifier.py` sends a summary and per-department lists
+(🔴 high, 🟡 medium, 🟢 low, ⚠️ failed, ❓ needs clarification). Works locally and in Lambda.
+
+| Variable | Required | Purpose |
+|---|---|---|
+| `TELEGRAM_BOT_TOKEN` | yes | bot token from @BotFather |
+| `TELEGRAM_CHAT_ID` | yes | main chat |
+| `TELEGRAM_DEPARTMENT_CHATS` | no | JSON `{"marketing": "-100123"}`: a separate chat per department |
+
+If the token or chat is missing, notifications are skipped silently. A Telegram failure never breaks
+processing, and the token never appears in logs. Only the standard library (`urllib`) is used.
+
+## Google Sheets registry
+
+Every request is appended as a row to a Google Sheet (`sheets_logger.py`): time, file, id, channel,
+category, department, priority, summary, actions, flags, and a "Work status" column.
+
+- **Option 1: Google Apps Script** (no Google Cloud, no keys). The script
+  [`apps_script/Code.js`](apps_script/Code.js) is published as a web app and checks a secret token.
+  Variables: `GOOGLE_APPS_SCRIPT_URL`, `GOOGLE_APPS_SCRIPT_TOKEN`, `GOOGLE_SHEET_TAB`.
+- **Option 2: Google Sheets API** (service account). Variables: `GOOGLE_SHEET_ID`,
+  `GOOGLE_SERVICE_ACCOUNT_JSON` or `GOOGLE_SERVICE_ACCOUNT_FILE`, `GOOGLE_SHEET_TAB`.
+
+The URL and token are secrets, never commit them. If writing is not configured or Google returns an
+error, the pipeline keeps working. The total size of Lambda environment variables is limited to 4 KB,
+and a JSON key takes about 2.5 KB.
+
+## Tests and CI
 
 ```bash
-aws s3 cp input_requests.csv s3://<input-bucket>/
-aws s3 ls s3://<output-bucket>/results/
+python -m pytest -v
 ```
 
-### Типові проблеми, які траплялись
-
-- **Lambda не запускається після завантаження файлу** — перевір фільтр суфікса
-  в Event notifications: зайвий пробіл (`" .csv"`) вимикає тригер без жодної
-  помилки. Перевірити можна командою `aws s3api get-bucket-notification-configuration`.
-- **`API_KEY_INVALID`** — некоректно введений ключ у змінній `GEMINI_API_KEY`.
-- **`No module named ...` / помилка імпорту `_cffi_backend`** — пакет зібрано
-  під Windows, а не під Linux (див. команду вище).
-- **Немає групи логів у CloudWatch** — функція ще жодного разу не викликалась.
-
-> У продакшн-версії ключ варто зберігати в AWS Secrets Manager, а не в змінній
-> середовища.
-
-## Паралельна обробка (asyncio)
-
-Запити класифікуються паралельно: `process_all_async()` у `main.py` запускає їх
-через `asyncio.gather`, а `Semaphore` обмежує кількість одночасних викликів
-LLM. Блокуюча `classify_request()` (з усім retry/fallback) виконується в
-потоках через `asyncio.to_thread`. Порядок результатів збігається з порядком
-у вхідному CSV.
-
-| Змінна середовища | Значення за замовчуванням | Призначення |
-|---|---|---|
-| `MAX_CONCURRENCY` | `3` | скільки запитів до Gemini виконується одночасно |
-| `MAX_REQUESTS_PER_MINUTE` | не задано (без обмеження) | рівномірно розподіляє старти запитів; для безкоштовного тіру Gemini (~15 RPM) підійде `12` |
-
-При критичній помилці авторизації нові запити не стартують, а вже оброблені
-результати зберігаються у `output.json` / `report.md`.
-
-> **Практичне спостереження:** на безкоштовному тарифі Gemini паралельність
-> швидко впирається в ліміт запитів на хвилину (`429`), тому там варто
-> задавати `MAX_REQUESTS_PER_MINUTE=12`. Тимчасові `503` від Google
-> обробляються retry-логікою; якщо всі спроби невдалі, запит потрапляє у звіт
-> зі статусом `failed`.
-
-## Telegram-сповіщення
-
-Після обробки сервіс надсилає результати в Telegram (`telegram_notifier.py`):
-
-1. **Підсумок:** кількість запитів, розподіл за пріоритетом, скільки потребують
-   уточнення чи не вдалося обробити, кількість запитів по відділах.
-2. **Повідомлення по відділах:** список запитів кожного відділу, найважливіші
-   зверху (🔴 high, 🟡 medium, 🟢 low, ⚠️ не вдалося обробити, ❓ потрібне
-   уточнення).
-
-Працює і в локальному запуску (`python main.py`), і в Lambda.
-
-| Змінна середовища | Обов'язкова | Призначення |
-|---|---|---|
-| `TELEGRAM_BOT_TOKEN` | так | токен бота від @BotFather |
-| `TELEGRAM_CHAT_ID` | так | основний чат: підсумок і відділи без власного чату |
-| `TELEGRAM_DEPARTMENT_CHATS` | ні | JSON `{"маркетинг": "-100123", "hr": "-100456"}` - окремий чат для відділу |
-
-Якщо токен чи чат не задані, сповіщення тихо пропускаються. Збій Telegram не
-ламає обробку: помилка лише логується, а токен у логи не потрапляє.
-Використовується тільки стандартна бібліотека (`urllib`), тому розмір пакета
-для Lambda не збільшується.
-
-## Реєстр у Google Sheets
-
-Кожен оброблений запит додається рядком у Google-таблицю (`sheets_logger.py`):
-час обробки, файл, id, канал, категорія, відділ, пріоритет, суть, дії, ознаки
-«потрібне уточнення» та «не вдалося обробити» і колонка «Статус роботи»
-(спочатку «нова») для подальшого відстеження людиною. Якщо таблиця порожня,
-заголовки створюються автоматично.
-
-Підтримано два способи запису. Якщо задано `GOOGLE_APPS_SCRIPT_URL`,
-використовується перший.
-
-### Спосіб 1: Google Apps Script (без Google Cloud і ключів)
-
-У таблицю додається невеликий скрипт [`apps_script/Code.js`](apps_script/Code.js),
-який публікується як веб-застосунок. Сервіс надсилає йому рядки HTTP-запитом із
-секретним токеном; скрипт перевіряє токен і додає рядки в таблицю.
-
-1. Таблиця → **Розширення → Apps Script**, вставити код із `apps_script/Code.js`.
-2. Замінити `TOKEN` на довгий випадковий рядок.
-3. **Deploy → New deployment → Web app**: *Execute as* — Me, *Who has access* — Anyone.
-4. Скопіювати URL (закінчується на `/exec`).
-
-| Змінна середовища | Призначення |
-|---|---|
-| `GOOGLE_APPS_SCRIPT_URL` | URL веб-застосунку (`.../exec`) |
-| `GOOGLE_APPS_SCRIPT_TOKEN` | той самий токен, що в скрипті |
-| `GOOGLE_SHEET_TAB` | назва аркуша (необов'язково; за замовчуванням перший) |
-
-Безпека: URL веб-застосунку відкритий, тому доступ захищено токеном у тілі
-запиту; без правильного токена скрипт нічого не записує. Токен і URL —
-секрети: у репозиторій їх не комітити.
-
-### Спосіб 2: Google Sheets API (сервісний акаунт)
-
-Потрібен JSON-ключ сервісного акаунта. У частини організацій створення ключів
-заборонене політикою `iam.disableServiceAccountKeyCreation` — тоді використовується
-спосіб 1.
-
-| Змінна середовища | Призначення |
-|---|---|
-| `GOOGLE_SHEET_ID` | ID таблиці (частина URL між `/d/` і `/edit`) |
-| `GOOGLE_SERVICE_ACCOUNT_JSON` | вміст JSON-ключа (Lambda) |
-| `GOOGLE_SERVICE_ACCOUNT_FILE` | або шлях до файлу з ключем (локально; файл не комітити!) |
-| `GOOGLE_SHEET_TAB` | назва аркуша (необов'язково) |
-
-Таблицю потрібно надати email сервісного акаунта з правами редактора.
-
-> **Обмеження:** сумарний розмір змінних середовища Lambda — 4 КБ, а JSON-ключ
-> займає ~2,5 КБ. У продакшн-версії краще Workload Identity Federation
-> (AWS → Google без ключів) або зберігання ключа в AWS Secrets Manager.
-
-Дані пишуться як текст, тож значення, що починаються з `=`, не виконуються як
-формули. Якщо запис не налаштовано або Google повернув помилку, конвеєр працює
-далі, а проблема лише логується.
-
-## SQL-база результатів (SQLite)
-
-Після обробки результати можна зберігати в SQLite (`db.py`) і рахувати по них
-статистику SQL-запитами. Модуль необов'язковий: вмикається змінною `DB_PATH`,
-а без неї нічого не робить. Збій бази не ламає обробку: помилка лише логується,
-результати все одно лежать в `output.json`.
-
-```
-DB_PATH=requests.db   # у .env
-python main.py
-```
-
-Схема: дві таблиці зі зв'язком «один до багатьох».
-
-```
-runs(id, source_file, started_at, total, failed)
-  └──< results(id, run_id → runs.id, request_id, channel, category,
-               target_department, priority, short_summary,
-               requested_actions, needs_clarification, processing_status)
-```
-
-- Один запуск обробки файлу = один рядок у `runs` і N рядків у `results`.
-- Запуск записується **однією транзакцією**: або всі рядки, або нічого.
-- Обмеження в схемі: `FOREIGN KEY`, `CHECK` для `priority` і `processing_status`.
-- Запити виконуються з параметрами (`?`), а не склеюванням рядків.
-
-Після запису в кінець `report.md` дописується розділ «Статистика з бази (SQL)»:
-розподіл за категоріями (`GROUP BY`), запити з пріоритетом `high` по відділах
-та історія останніх запусків (`LEFT JOIN` + `GROUP BY`). Приклади запитів для
-самостійної практики лежать у [`queries.sql`](queries.sql).
-
-У Docker файл бази створюється в робочій папці `/data`, тобто лишається на
-комп'ютері в змонтованій папці `data/`.
-
-> **Обмеження:** у Lambda цей модуль не викликається, бо файл SQLite не
-> зберігається між запусками. Для хмарної версії потрібна окрема база
-> (наприклад, PostgreSQL на RDS).
-
-## Тестування
-
-Проєкт покритий **83 автотестами** (`pytest`) кількох типів:
-
-- **Юніт-тести** (`tests/test_schema.py`, `tests/test_classifier.py`) — перевіряють
-  окремі функції ізольовано: валідацію Pydantic-схеми, розпізнавання
-  типів помилок API, парсинг часу очікування з тексту помилки Google.
-- **Інтеграційні тести** (`tests/test_classifier_integration.py`) — перевіряють
-  **повний цикл** `classify_request()` з мокованим `genai.Client`:
-  успішну класифікацію, повний провал усіх спроб з переходом у
-  `processing_status="failed"`, і реалістичний сценарій "перша спроба
-  невдала, друга успішна".
-
-- **Тести запису в Google Sheets** (`tests/test_sheets_logger.py`) — формування рядків,
-  автоматичні заголовки, append-запит, робота без налаштувань, відсутність
-  винятків при збоях Google.
-- **Тести Telegram-сповіщень** (`tests/test_telegram_notifier.py`) — форматування,
-  розбиття довгих повідомлень, маршрутизація по відділах, повтор при `429`,
-  відсутність витоку токена в помилках.
-- **Тести паралельної обробки** (`tests/test_main_async.py`) — порядок результатів,
-  дотримання ліміту `Semaphore` та RPM, збереження часткових результатів
-  при критичній помилці.
-- **Тести SQL-бази** (`tests/test_db.py`) — запис запуску й рядків, транзакція з
-  відкатом, `FOREIGN KEY` та `CHECK`, робота без `DB_PATH`, SQL-статистика
-  у звіті.
-
-```bash
-pytest -v
-```
-
-Очікуваний результат: **83 passed**.
-
-## Логування
-
-Замість `print()` використовується стандартний модуль `logging` з
-рівнями INFO/WARNING/ERROR та часовими мітками — кожен крок обробки
-(успіх, retry, перехід на fallback-модель, невдача) фіксується в лог,
-а не губиться у виводі консолі.
-
-## CI (GitHub Actions)
-
-При кожному push/pull request у `main` автоматично запускається lint
-(`ruff`) та всі тести (`pytest`). Конфігурація:
-[`.github/workflows/ci.yml`](.github/workflows/ci.yml).
-
-## Структура схеми виводу
-
-Обов'язкові поля структури: `id`, `category`, `target_department`,
-`priority`, `short_summary`, `requested_actions`, `needs_clarification`.
-
-**Розширення схеми:** додано поле `processing_status` (`"ok"` / `"failed"`).
-
-**Чому:** сервіс має "коректно обробляти випадки, коли
-модель повернула невалідні дані". Кожен запит, який не вдалось коректно
-обробити навіть після повторних спроб, все одно потрапляє в
-`output.json` і `report.md`, але з чітким маркером
-`processing_status: "failed"` — команда бачить **усі** вхідні запити,
-включно з проблемними, замість того щоб вони "губились" без сліду.
-
-**Технічна деталь схеми:** поле `target_department` — це `str = ""`
-(порожній рядок замість `None`/`null`), а не `Optional[str]` — обхід
-реальної несумісності між Pydantic `Optional` та форматом
-структурованого виводу Gemini API (див. нижче).
-
-## Де рішення ламається / обмеження
-
-### Невалідний вивід LLM
-Обробляється через retry-логіку (`classifier.py`): до 3 повторних спроб
-з **exponential backoff** (3с → 6с → 12с → 24с) при `JSONDecodeError`,
-`ValidationError` чи помилках API. Якщо всі спроби невдалі — запит
-потрапляє в результат зі статусом `processing_status: "failed"`.
-
-**Реальний кейс, з яким зіткнувся під час розробки:** Pydantic-поле
-`target_department: Optional[str] = None` викликало помилку валідації
-на боці `google-genai` SDK при конвертації схеми в Gemini structured
-output (`literal_error` для типу 'NULL'). Рішення: замінив на
-`str = ""` (порожній рядок як sentinel-значення).
-
-### Нестабільність версій моделей провайдера
-Резервна модель `gemini-2.5-flash` виявилась вже недоступною для нових
-користувачів (`404 NOT_FOUND`, з рекомендацією перейти на
-`gemini-3.6-flash` прямо в тексті помилки Google). Це той самий клас
-проблем, з яким я вже стикався при роботі з Groq API (там
-`llama-3.3-70b-versatile` теж виявилась deprecated).
-
-**Поточне рішення:** `MODEL = "gemini-flash-lite-latest"`,
-`FALLBACK_MODEL = "gemini-flash-latest"` — **aliases**, які Google сам
-оновлює на актуальну модель, замість захардкодженої версії.
-
-**Що зробив би в продакшн-версії:** перевірка доступних моделей через
-`client.models.list()` при старті сервісу, з fallback на список
-кандидатів за пріоритетом.
-
-Окремо стикнувся з тимчасовими `503 UNAVAILABLE` та `429
-RESOURCE_EXHAUSTED` (денна квота, не хвилинна!) — вирішується
-типізованою обробкою помилок (`classify_error()`), яка для rate limit
-чекає **точний** рекомендований Google час (`parse_retry_delay()`),
-а не здогадний exponential backoff.
-
-### Великий обсяг запитів
-Безкоштовний тір Gemini має денний ліміт запитів (не тільки RPM). Для
-18 тестових запитів цього достатньо, але для сотень/тисяч запитів на
-день знадобиться Batch API або платний тір + `asyncio`.
-
-У Lambda додається ще одне обмеження: максимальний час виконання одного
-виклику — 15 хвилин. Паралельна обробка (`MAX_CONCURRENCY`) допомагає, але
-на безкоштовному тарифі впирається в квоту RPM. Для дуже великих файлів
-потрібне розбиття на чанки (наприклад, через SQS).
-
-### Недетермінізм LLM
-Виставлено `temperature=0`, що зменшує, але не гарантує повну
-відсутність варіативності відповідей між запусками.
-
-### Вартість токенів
-Для 18 запитів вартість практично нульова (безкоштовний тір). Для
-продакшн-обсягів варто кешувати повторювані запити та моніторити
-вартість через Google Cloud Billing alerts.
-
-## Що зробив би далі, якби було більше часу
-
-1. **Підтвердження в Telegram** (human-in-the-loop) — кнопки «Прийняти» /
-   «Змінити відділ» / «Відхилити» під кожним запитом, обробник відповідей
-   через Lambda Function URL.
-2. **Infrastructure as Code** (AWS SAM або Terraform) — замість ручного
-   налаштування бакетів, ролі та тригера в консолі.
-3. **Dead-letter queue та алерти** на помилки Lambda (SQS DLQ + CloudWatch Alarm).
-4. **Lambda з контейнерного образу** — використати той самий Docker-образ
-   замість збірки zip-архіву вручну.
-5. Оновлення колонки «Статус роботи» в Google Sheets після підтвердження запиту
-   в Telegram.
-6. **PostgreSQL + Docker Compose** замість SQLite: застосунок і база в одному
-   `docker-compose.yml`, а в хмарі — RDS.
-
-## Структура проєкту
+The project has **133 automated tests**:
+
+- unit tests for the schema and error handling;
+- integration tests for `classify_request()` with a mocked `genai.Client` (success, total failure, retry);
+- HTTP API tests (`tests/test_api.py`): authentication, validation, status codes 401/404/422/503;
+- an end-to-end API test with a real database (`tests/test_api_db.py`);
+- database tests (`tests/test_db.py`): transactions, `FOREIGN KEY`, `CHECK`, priority override audit, migration;
+- tests for Google Sheets, Telegram, and parallel processing.
+
+Database tests use `TEST_DATABASE_URL` and a temporary schema, so they never touch real data.
+Without that variable they are skipped.
+
+**GitHub Actions** runs `ruff`, `pytest` with a PostgreSQL service container, and a Docker image build
+on every pull request and push to `main` ([`ci.yml`](.github/workflows/ci.yml)).
+
+## LLM output structure
+
+Required fields: `id`, `category`, `target_department`, `priority`, `short_summary`,
+`requested_actions`, `needs_clarification`. Extension: `processing_status` (`ok` / `failed`).
+A request that could not be processed after retries still appears in the output with status `failed`,
+so problem requests are never lost.
+
+`target_department` is `str = ""` instead of `Optional[str]`: a workaround for a real incompatibility
+between Pydantic `Optional` and structured output in `google-genai` (`literal_error` for type `NULL`).
+
+## Limitations and where it breaks
+
+- **Invalid LLM output:** up to 3 retries with exponential backoff (3s → 6s → 12s → 24s), then
+  `processing_status: "failed"`.
+- **Model version churn:** aliases (`gemini-flash-lite-latest`, `gemini-flash-latest`) that Google
+  updates itself. For rate limits the service waits the exact time Google recommends (`parse_retry_delay()`).
+- **Quotas:** the free Gemini tier has daily and per-minute limits. Large volumes need the Batch API
+  or a paid tier. Lambda allows 15 minutes per invocation, so very large files need chunking (for example, SQS).
+- **Non-determinism:** `temperature=0` reduces but does not remove variation.
+- **API:** no request deduplication (each request becomes its own record). The schema is upgraded with
+  `ALTER ... IF NOT EXISTS`; this is where Alembic would come in later.
+
+## Roadmap
+
+1. Telegram buttons to change priority in one tap (needs a public HTTPS tunnel).
+2. AI agent with tool calling (search similar requests, escalation).
+3. RAG over request history and an evaluation set for prompts.
+4. Infrastructure as Code (AWS SAM or Terraform), dead-letter queue and alarms for Lambda.
+5. Alembic migrations.
+
+## Project structure
 
 ```
 netpeak-ai-request-classifier/
-├── .github/workflows/ci.yml    # CI: lint + тести на кожен push
-├── main.py                      # orchestration: CSV -> LLM -> output.json + report.md
-├── classifier.py                 # виклик Gemini API, retry-логіка, логування
-├── apps_script/Code.js                # скрипт для таблиці (запис через Apps Script)
-├── sheets_logger.py                   # реєстр запитів у Google Sheets
-├── db.py                              # збереження в SQLite + SQL-статистика для звіту
-├── queries.sql                        # приклади SQL-запитів до бази
-├── telegram_notifier.py               # Telegram-сповіщення (підсумок + відділи)
-├── lambda_handler.py              # AWS Lambda: S3-подія -> класифікація -> результат в S3
-├── schema.py                      # Pydantic-схема структурованого виводу
-├── tests/
-│   ├── test_schema.py                    # юніт-тести схеми
-│   ├── test_classifier.py                # юніт-тести обробки помилок
-│   ├── test_sheets_logger.py             # тести запису в Google Sheets
-│   ├── test_telegram_notifier.py         # тести Telegram-сповіщень
-│   ├── test_main_async.py                # тести паралельної обробки (asyncio)
-│   ├── test_db.py                        # тести SQL-бази
-│   └── test_classifier_integration.py    # інтеграційні тести з mock genai.Client
-├── input_requests.csv                # вхідні дані (надані)
-├── pyproject.toml                     # метадані пакету, залежності, ruff-конфіг
-├── requirements.txt
-├── Dockerfile                        # образ для запуску в контейнері
-├── .dockerignore                     # що не потрапляє в образ (.env, package/ тощо)
+├── .github/workflows/ci.yml     # CI: ruff + pytest (PostgreSQL) + docker build
+├── api.py                       # FastAPI: /classify, /results, /stats/overrides
+├── main.py                      # batch: CSV -> LLM -> output.json + report.md
+├── classifier.py                # Gemini call, retry logic, logging
+├── db.py                        # PostgreSQL: saving, priority override, statistics
+├── schema.py                    # Pydantic output schema
+├── lambda_handler.py            # AWS Lambda: S3 event -> classify -> S3
+├── sheets_logger.py             # Google Sheets registry
+├── telegram_notifier.py         # Telegram notifications (batch mode)
+├── apps_script/Code.js          # Apps Script for the sheet
+├── queries.sql                  # sample SQL queries
+├── n8n/workflows/               # exported n8n workflows
+├── tests/                       # 133 tests (conftest.py, test_api*.py, test_db.py, ...)
+├── docker-compose.yml           # db + api + n8n
+├── Dockerfile
+├── .dockerignore
 ├── .env.example
-└── README.md
+├── pyproject.toml
+├── requirements.txt
+└── README.md / README.uk.md
 ```
