@@ -1,0 +1,173 @@
+{
+  "name": "Classify and alert",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "request",
+        "authentication": "headerAuth",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.2,
+      "position": [
+        0,
+        0
+      ],
+      "id": "43375697-5e54-4ccf-8230-a78128a0b593",
+      "name": "Webhook",
+      "webhookId": "a4198029-e4bb-4016-8185-2f7dd298b969",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "JlQpcFE6n6JM9fS4",
+          "name": "Header Auth account 3"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://api:8000/classify",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "=keypair",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "id",
+              "value": "={{ $json.body.id }}"
+            },
+            {
+              "name": "text",
+              "value": "={{ $json.body.text }}"
+            },
+            {
+              "name": "channel",
+              "value": "={{ $json.body.channel || \"Webhook\" }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        208,
+        0
+      ],
+      "id": "232de64b-a384-459e-80e0-f027f6831999",
+      "name": "HTTP Request",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "g0xPFrrecCoStUUm",
+          "name": "Header Auth account 2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 4
+          },
+          "conditions": [
+            {
+              "id": "e99c712c-cc45-47c2-8fe3-19666977dc3a",
+              "leftValue": "={{ $json.priority }}",
+              "rightValue": "high",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.4,
+      "position": [
+        384,
+        0
+      ],
+      "id": "af7ed601-8f45-4d24-a219-ca42b02c4b18",
+      "name": "If"
+    },
+    {
+      "parameters": {
+        "chatId": "626099699",
+        "text": "=🔴 Висока важливість #{{ $json.record_id }} {{ $json.id }} · {{ $json.category }} {{ $json.short_summary }}",
+        "additionalFields": {}
+      },
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        608,
+        -80
+      ],
+      "id": "52c45fa9-c7a7-459d-abd9-b234ec4290b0",
+      "name": "Send a text message",
+      "webhookId": "20a542b3-c973-4339-a0a2-f01013c36a83",
+      "credentials": {
+        "telegramApi": {
+          "id": "RHxhZ8jXJhfkkIBo",
+          "name": "Telegram account 2"
+        }
+      }
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "HTTP Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If": {
+      "main": [
+        [
+          {
+            "node": "Send a text message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP Request": {
+      "main": [
+        [
+          {
+            "node": "If",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "versionId": "209bbf9a-7169-4c3e-800e-0cadeacb8476",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "821bbb100fea051c2d4c62da01ff1e3eb32cc6ac6e0682453aee3ad07eb36a27"
+  },
+  "nodeGroups": [],
+  "id": "v1T9iiDPVrPox3NT",
+  "tags": []
+}
