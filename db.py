@@ -31,11 +31,17 @@ from datetime import datetime, timezone
 from typing import Any
 
 import psycopg
+from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
 logger = logging.getLogger(__name__)
 
 CONNECT_TIMEOUT_SECONDS = 5
+
+
+class DatabaseUnavailableError(Exception):
+    """База не налаштована або недоступна. API перетворює це на відповідь 503."""
+
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS runs (
@@ -60,8 +66,19 @@ CREATE TABLE IF NOT EXISTS results (
     requested_actions   JSONB   NOT NULL DEFAULT '[]'::jsonb,
     needs_clarification BOOLEAN NOT NULL DEFAULT FALSE,
     processing_status   TEXT    NOT NULL
-                        CHECK (processing_status IN ('ok', 'failed'))
+                        CHECK (processing_status IN ('ok', 'failed')),
+    priority_override   TEXT
+                        CHECK (priority_override IN ('low', 'medium', 'high')),
+    overridden_by       TEXT,
+    overridden_at       TIMESTAMPTZ
 );
+
+-- Міграція: CREATE TABLE IF NOT EXISTS не змінює вже існуючу таблицю,
+-- тому для баз, створених раніше, додаємо нові колонки окремо.
+ALTER TABLE results ADD COLUMN IF NOT EXISTS priority_override TEXT
+    CHECK (priority_override IN ('low', 'medium', 'high'));
+ALTER TABLE results ADD COLUMN IF NOT EXISTS overridden_by TEXT;
+ALTER TABLE results ADD COLUMN IF NOT EXISTS overridden_at TIMESTAMPTZ;
 
 CREATE INDEX IF NOT EXISTS idx_results_run_id   ON results (run_id);
 CREATE INDEX IF NOT EXISTS idx_results_category ON results (category);
@@ -81,6 +98,34 @@ INSERT INTO results (
 ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
 """
 
+INSERT_RESULT_RETURNING = INSERT_RESULT.rstrip() + "\nRETURNING id"
+
+SELECT_RESULT = """
+SELECT
+    id, run_id, request_id, channel, category, target_department,
+    priority, priority_override,
+    COALESCE(priority_override, priority) AS effective_priority,
+    overridden_by, overridden_at, short_summary, requested_actions,
+    needs_clarification, processing_status
+FROM results
+WHERE id = %s
+"""
+
+UPDATE_PRIORITY = """
+UPDATE results
+SET priority_override = %s, overridden_by = %s, overridden_at = now()
+WHERE id = %s
+"""
+
+# Скільки заявок переглянув керівник і скільки разів не погодився з AI.
+STATS_OVERRIDES = """
+SELECT
+    COUNT(*) AS total,
+    COUNT(priority_override) AS reviewed,
+    COUNT(*) FILTER (WHERE priority_override IS NOT NULL AND priority_override <> priority) AS changed
+FROM results
+"""
+
 # --- Запити для статистики (DQL) --------------------------------------------
 
 # GROUP BY + COUNT: скільки запитів у кожній категорії в цьому запуску.
@@ -92,13 +137,14 @@ GROUP BY category
 ORDER BY cnt DESC, category
 """
 
-# WHERE + GROUP BY + CASE: запити з пріоритетом high по відділах.
+# WHERE + GROUP BY + CASE: запити з фактичним пріоритетом high по відділах
+# (якщо керівник змінив пріоритет, береться його значення).
 STATS_HIGH_BY_DEPARTMENT = """
 SELECT
     CASE WHEN target_department = '' THEN 'не визначено' ELSE target_department END AS department,
     COUNT(*) AS cnt
 FROM results
-WHERE run_id = %s AND priority = 'high'
+WHERE run_id = %s AND COALESCE(priority_override, priority) = 'high'
 GROUP BY department
 ORDER BY cnt DESC, department
 """
@@ -124,6 +170,14 @@ LIMIT %s
 def get_database_url(db_url: str | None = None) -> str | None:
     """Повертає рядок підключення: переданий явно або зі змінної DATABASE_URL."""
     return db_url or os.getenv("DATABASE_URL") or None
+
+
+def _require_db_url(db_url: str | None) -> str:
+    """Рядок підключення або DatabaseUnavailableError, якщо базу не налаштовано."""
+    url = get_database_url(db_url)
+    if not url:
+        raise DatabaseUnavailableError("DATABASE_URL не задано")
+    return url
 
 
 def init_db(conn: psycopg.Connection) -> None:
@@ -190,6 +244,93 @@ def save_results(
 
     logger.info(f"Збережено в базу: запуск #{run_id}, {len(results)} рядків.")
     return run_id
+
+
+def save_api_result(result: dict[str, Any], source_file: str = "api", db_url: str | None = None) -> int | None:
+    """Зберігає одну заявку, отриману через API, і повертає id рядка в results.
+
+    Кожна заявка з API це окремий запуск (runs.total = 1) із джерелом "api".
+    Ніколи не піднімає виняток: якщо бази немає чи сталась помилка, повертає None,
+    а класифікація для користувача все одно працює.
+    """
+    db_url = get_database_url(db_url)
+    if not db_url:
+        return None
+
+    failed = 1 if result.get("processing_status") == "failed" else 0
+    try:
+        with psycopg.connect(db_url, connect_timeout=CONNECT_TIMEOUT_SECONDS) as conn:
+            init_db(conn)
+            run_id = conn.execute(INSERT_RUN, (source_file, datetime.now(timezone.utc), 1, failed)).fetchone()[0]
+            record_id = conn.execute(INSERT_RESULT_RETURNING, _row_values(run_id, result)).fetchone()[0]
+    except (psycopg.Error, KeyError) as e:
+        logger.error(f"Не вдалося зберегти заявку з API в базу: {e}")
+        return None
+
+    return record_id
+
+
+def get_result(record_id: int, db_url: str | None = None) -> dict[str, Any] | None:
+    """Повертає один запис із results (словник) або None, якщо такого id немає.
+
+    Raises:
+        DatabaseUnavailableError: базу не налаштовано або вона недоступна.
+    """
+    db_url = _require_db_url(db_url)
+    try:
+        with psycopg.connect(db_url, connect_timeout=CONNECT_TIMEOUT_SECONDS, row_factory=dict_row) as conn:
+            return conn.execute(SELECT_RESULT, (record_id,)).fetchone()
+    except psycopg.Error as e:
+        logger.error(f"Не вдалося прочитати запис {record_id}: {e}")
+        raise DatabaseUnavailableError("база недоступна") from e
+
+
+def set_priority_override(
+    record_id: int, priority: str, changed_by: str, db_url: str | None = None
+) -> dict[str, Any] | None:
+    """Записує пріоритет, який виставила людина, і повертає оновлений запис.
+
+    Пріоритет від AI (колонка priority) не змінюється: це аудит. Хто й коли
+    змінив, лишається в overridden_by та overridden_at.
+
+    Returns:
+        Оновлений запис або None, якщо запису з таким id немає.
+
+    Raises:
+        DatabaseUnavailableError: базу не налаштовано або вона недоступна.
+    """
+    db_url = _require_db_url(db_url)
+    try:
+        with psycopg.connect(db_url, connect_timeout=CONNECT_TIMEOUT_SECONDS, row_factory=dict_row) as conn:
+            cursor = conn.execute(UPDATE_PRIORITY, (priority, changed_by, record_id))
+            if cursor.rowcount == 0:
+                return None
+            return conn.execute(SELECT_RESULT, (record_id,)).fetchone()
+    except psycopg.Error as e:
+        logger.error(f"Не вдалося змінити пріоритет запису {record_id}: {e}")
+        raise DatabaseUnavailableError("база недоступна") from e
+
+
+def get_override_stats(db_url: str | None = None) -> dict[str, Any]:
+    """Скільки заявок переглянув керівник і як часто не погодився з AI.
+
+    Returns:
+        {"total": усього заявок, "reviewed": переглянуто людиною,
+         "changed": пріоритет змінено, "disagreement_rate": changed / reviewed або None}
+
+    Raises:
+        DatabaseUnavailableError: базу не налаштовано або вона недоступна.
+    """
+    db_url = _require_db_url(db_url)
+    try:
+        with psycopg.connect(db_url, connect_timeout=CONNECT_TIMEOUT_SECONDS) as conn:
+            total, reviewed, changed = conn.execute(STATS_OVERRIDES).fetchone()
+    except psycopg.Error as e:
+        logger.error(f"Не вдалося порахувати статистику змін пріоритету: {e}")
+        raise DatabaseUnavailableError("база недоступна") from e
+
+    rate = round(changed / reviewed, 3) if reviewed else None
+    return {"total": total, "reviewed": reviewed, "changed": changed, "disagreement_rate": rate}
 
 
 def _md_cell(value: Any) -> str:
