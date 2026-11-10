@@ -1,33 +1,22 @@
 """Тести для db.py (PostgreSQL).
 
-Потрібна змінна середовища TEST_DATABASE_URL (рядок підключення до PostgreSQL).
-Без неї тести пропускаються. Кожен тест працює у власній тимчасовій схемі,
-яка видаляється після тесту, тож реальні дані в базі не зачіпаються.
+Фікстура db_url (тимчасова схема) лежить у conftest.py. Без TEST_DATABASE_URL тести пропускаються.
 """
-
-import os
-import uuid
 
 import psycopg
 import pytest
-from psycopg.conninfo import make_conninfo
 
-from db import append_stats_to_report, build_stats_section, init_db, save_results
-
-BASE_URL = os.getenv("TEST_DATABASE_URL")
-
-pytestmark = pytest.mark.skipif(not BASE_URL, reason="TEST_DATABASE_URL не задано (потрібен PostgreSQL)")
-
-
-@pytest.fixture
-def db_url():
-    """Рядок підключення до порожньої тимчасової схеми (search_path)."""
-    schema = f"test_{uuid.uuid4().hex[:12]}"
-    with psycopg.connect(BASE_URL, autocommit=True) as admin:
-        admin.execute(f'CREATE SCHEMA "{schema}"')
-    yield make_conninfo(BASE_URL, options=f"-c search_path={schema}")
-    with psycopg.connect(BASE_URL, autocommit=True) as admin:
-        admin.execute(f'DROP SCHEMA "{schema}" CASCADE')
+from db import (
+    DatabaseUnavailableError,
+    append_stats_to_report,
+    build_stats_section,
+    get_override_stats,
+    get_result,
+    init_db,
+    save_api_result,
+    save_results,
+    set_priority_override,
+)
 
 
 def make_result(req_id: str = "REQ-001", **overrides) -> dict:
@@ -263,3 +252,129 @@ def test_append_stats_to_report_false_when_disabled_or_unwritable(monkeypatch, t
     run_id = save_results([make_result()], "in.csv", db_url=db_url)
     bad_report = str(tmp_path / "no_such_dir" / "report.md")
     assert append_stats_to_report(bad_report, run_id, db_url=db_url) is False
+
+
+# --- Заявки з API та зміна пріоритету людиною ----------------------------------
+
+
+def test_save_api_result_returns_record_id_and_creates_api_run(db_url):
+    record_id = save_api_result(make_result("API-1"), db_url=db_url)
+
+    assert record_id == 1
+    assert fetch_all(db_url, "SELECT source_file, total FROM runs") == [("api", 1)]
+    assert fetch_all(db_url, "SELECT request_id FROM results WHERE id = %s", (record_id,)) == [("API-1",)]
+
+
+def test_save_api_result_none_without_db_or_on_error(monkeypatch):
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    assert save_api_result(make_result()) is None
+    assert save_api_result(make_result(), db_url="postgresql://x:y@127.0.0.1:1/none") is None
+
+
+def test_get_result_shows_effective_priority(db_url):
+    record_id = save_api_result(make_result(priority="medium"), db_url=db_url)
+
+    record = get_result(record_id, db_url=db_url)
+
+    assert record["priority"] == "medium"
+    assert record["priority_override"] is None
+    assert record["effective_priority"] == "medium"
+    assert record["requested_actions"] == ["перевірити експорт", "виправити помилку"]
+
+
+def test_get_result_missing_returns_none(db_url):
+    with psycopg.connect(db_url) as conn:
+        init_db(conn)
+    assert get_result(999, db_url=db_url) is None
+
+
+def test_set_priority_override_keeps_ai_value_and_records_audit(db_url):
+    record_id = save_api_result(make_result(priority="low"), db_url=db_url)
+
+    record = set_priority_override(record_id, "high", "manager", db_url=db_url)
+
+    assert record["priority"] == "low"  # оригінал від AI не перезаписано
+    assert record["priority_override"] == "high"
+    assert record["effective_priority"] == "high"
+    assert record["overridden_by"] == "manager"
+    assert record["overridden_at"] is not None
+
+
+def test_set_priority_override_unknown_id_returns_none(db_url):
+    with psycopg.connect(db_url) as conn:
+        init_db(conn)
+    assert set_priority_override(999, "high", "manager", db_url=db_url) is None
+
+
+def test_set_priority_override_rejects_bad_priority_at_db_level(db_url):
+    record_id = save_api_result(make_result(), db_url=db_url)
+
+    with pytest.raises(DatabaseUnavailableError):
+        set_priority_override(record_id, "urgent", "manager", db_url=db_url)
+
+
+def test_get_and_set_raise_without_database(monkeypatch):
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    with pytest.raises(DatabaseUnavailableError):
+        get_result(1)
+    with pytest.raises(DatabaseUnavailableError):
+        set_priority_override(1, "high", "manager")
+    with pytest.raises(DatabaseUnavailableError):
+        get_override_stats()
+
+
+def test_override_stats_counts_reviewed_and_changed(db_url):
+    a = save_api_result(make_result("A", priority="low"), db_url=db_url)
+    b = save_api_result(make_result("B", priority="high"), db_url=db_url)
+    save_api_result(make_result("C", priority="medium"), db_url=db_url)  # не переглядали
+
+    set_priority_override(a, "high", "manager", db_url=db_url)  # змінив
+    set_priority_override(b, "high", "manager", db_url=db_url)  # підтвердив
+
+    stats = get_override_stats(db_url=db_url)
+
+    assert stats == {"total": 3, "reviewed": 2, "changed": 1, "disagreement_rate": 0.5}
+
+
+def test_override_stats_rate_is_none_without_reviews(db_url):
+    save_api_result(make_result(), db_url=db_url)
+
+    stats = get_override_stats(db_url=db_url)
+
+    assert stats["reviewed"] == 0
+    assert stats["disagreement_rate"] is None
+
+
+def test_stats_high_priority_uses_manager_decision(db_url):
+    results = [
+        make_result("A", priority="low", target_department="Фінанси"),
+        make_result("B", priority="high", target_department="HR"),
+    ]
+    run_id = save_results(results, "in.csv", db_url=db_url)
+    with psycopg.connect(db_url) as conn:
+        # керівник підняв A до high і опустив B до low
+        conn.execute("UPDATE results SET priority_override = 'high' WHERE request_id = 'A'")
+        conn.execute("UPDATE results SET priority_override = 'low' WHERE request_id = 'B'")
+
+    section = build_stats_section(run_id, db_url=db_url)
+
+    assert "| Фінанси | 1 |" in section
+    assert "HR" not in section
+
+
+def test_init_db_migrates_existing_table_without_override_columns(db_url):
+    with psycopg.connect(db_url) as conn:
+        conn.execute("CREATE TABLE runs (id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY, source_file TEXT)")
+        conn.execute(
+            "CREATE TABLE results (id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY, "
+            "run_id BIGINT, category TEXT, priority TEXT)"
+        )
+        init_db(conn)  # старі таблиці без нових колонок мають отримати їх
+
+    columns = fetch_all(
+        db_url,
+        "SELECT column_name FROM information_schema.columns "
+        "WHERE table_schema = current_schema() AND table_name = 'results'",
+    )
+    names = {c[0] for c in columns}
+    assert {"priority_override", "overridden_by", "overridden_at"} <= names
